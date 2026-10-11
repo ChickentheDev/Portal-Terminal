@@ -23,7 +23,7 @@ chmod +x Portal-Terminal-*.AppImage
 ./Portal-Terminal-*.AppImage
 ```
 
-### Option 3 — Debian / Ubuntu / Pop!_OS / Mint
+### Option 3 — Debian / Ubuntu / Pop!_OS / Mint ([Releases](https://github.com/chickenthedev/portal-terminal/releases)
 
 ```bash
 sudo dpkg -i portal-terminal_*.deb
