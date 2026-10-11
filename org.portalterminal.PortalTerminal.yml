@@ -1,0 +1,43 @@
+# Flatpak manifest for Portal Terminal
+# Build with:
+#   flatpak-builder --user --install --force-clean build-dir org.portalterminal.PortalTerminal.yml
+#
+# Note: This is a simple Electron app package. You still need Python 3 and Ollama
+# on the host for full functionality.
+
+app-id: org.portalterminal.PortalTerminal
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+base: org.electronjs.Electron2.BaseApp
+base-version: '24.08'
+command: portal-terminal
+separate-locales: false
+
+finish-args:
+  - --share=ipc
+  - --socket=x11
+  - --socket=wayland
+  - --socket=pulseaudio
+  - --device=dri
+  - --share=network
+  - --filesystem=home
+  - --filesystem=xdg-run/dconf
+  - --filesystem=xdg-config/dconf:ro
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.freedesktop.Flatpak
+  - --env=NPM_CONFIG_LOGLEVEL=error
+
+modules:
+  - name: portal-terminal
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 portal-terminal.sh /app/bin/portal-terminal
+      - mkdir -p /app/share/portal-terminal
+      - cp -r . /app/share/portal-terminal/
+      - install -Dm644 icon.png /app/share/icons/hicolor/512x512/apps/org.portalterminal.PortalTerminal.png
+      - install -Dm644 org.portalterminal.PortalTerminal.desktop /app/share/applications/org.portalterminal.PortalTerminal.desktop
+      - install -Dm644 org.portalterminal.PortalTerminal.metainfo.xml /app/share/metainfo/org.portalterminal.PortalTerminal.metainfo.xml
+    sources:
+      - type: dir
+        path: .

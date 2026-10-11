@@ -1,0 +1,86 @@
+{
+  "name": "portal-terminal",
+  "productName": "Portal Terminal",
+  "version": "1.0.0",
+  "description": "Portal Terminal \u2014 a minimal black and white chat app where a local Ollama model can use your terminal.",
+  "main": "main.js",
+  "author": "Portal Terminal",
+  "license": "MIT",
+  "homepage": "https://github.com/yourusername/portal-terminal",
+  "private": true,
+  "scripts": {
+    "start": "electron . --no-sandbox",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "dist:appimage": "electron-builder --linux AppImage",
+    "dist:deb": "electron-builder --linux deb",
+    "dist:rpm": "electron-builder --linux rpm",
+    "dist:linux": "electron-builder --linux AppImage deb rpm"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "dependencies": {
+    "@xterm/xterm": "^5.5.0",
+    "@xterm/addon-fit": "^0.10.0"
+  },
+  "build": {
+    "appId": "com.portalterminal.app",
+    "productName": "Portal Terminal",
+    "copyright": "Copyright \u00a9 2026 Portal Terminal",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "**/*",
+      "!dist/**",
+      "!**/*.md",
+      "!.git/**",
+      "!icon-*.png"
+    ],
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb",
+        "rpm"
+      ],
+      "category": "Utility;System;TerminalEmulator;",
+      "icon": "icon.png",
+      "desktop": {
+        "Name": "Portal Terminal",
+        "Comment": "Chat with a local AI that can use your terminal",
+        "StartupWMClass": "portal-terminal",
+        "Terminal": "false"
+      },
+      "synopsis": "Chat with a local AI that can use your terminal",
+      "description": "Portal Terminal is a minimal black-and-white desktop app that lets you chat with a local Ollama model which can run commands in a real terminal, or use the built-in terminal yourself.",
+      "maintainer": "Portal Terminal <portal@local>",
+      "vendor": "Portal Terminal"
+    },
+    "appImage": {
+      "artifactName": "Portal-Terminal-${version}-${arch}.AppImage"
+    },
+    "deb": {
+      "artifactName": "portal-terminal_${version}_${arch}.deb",
+      "depends": [
+        "python3"
+      ]
+    },
+    "rpm": {
+      "artifactName": "portal-terminal-${version}.${arch}.rpm",
+      "depends": [
+        "python3"
+      ]
+    },
+    "asarUnpack": [
+      "pty_bridge.py"
+    ],
+    "extraResources": [
+      {
+        "from": "pty_bridge.py",
+        "to": "pty_bridge.py"
+      }
+    ]
+  }
+}

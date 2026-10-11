@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.portalterminal.PortalTerminal</id>
+  <name>Portal Terminal</name>
+  <summary>Chat with a local AI that can use your terminal</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      Portal Terminal is a minimal black-and-white desktop app that lets you
+      chat with a local Ollama model which can run commands in a real terminal,
+      or use the built-in terminal yourself.
+    </p>
+  </description>
+  <launchable type="desktop-id">org.portalterminal.PortalTerminal.desktop</launchable>
+  <url type="homepage">https://github.com/yourusername/portal-terminal</url>
+  <provides>
+    <id>portal-terminal</id>
+  </provides>
+  <categories>
+    <category>Utility</category>
+    <category>System</category>
+    <category>TerminalEmulator</category>
+  </categories>
+</component>

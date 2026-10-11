@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Electron / build output
+dist/
+out/
+build-dir/
+*.AppImage
+*.deb
+*.rpm
+*.asar
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Logs and local data
+*.log
+npm-debug.log*
+.env
+.env.*
+
+# Optional local overrides
+local.json

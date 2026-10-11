@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Portal Terminal
+Comment=Chat with a local AI that can use your terminal
+Exec=portal-terminal
+Icon=org.portalterminal.PortalTerminal
+Type=Application
+Categories=Utility;System;TerminalEmulator;
+StartupWMClass=portal-terminal
+Terminal=false

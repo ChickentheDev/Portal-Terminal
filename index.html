@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Portal Terminal</title>
+  <link rel="stylesheet" href="node_modules/@xterm/xterm/css/xterm.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body data-theme="dark" data-view="chat">
+  <div id="app">
+    <aside id="sidebar">
+      <div class="side-top">
+        <button id="new-chat" class="btn block">New chat</button>
+        <input id="search" type="search" placeholder="Search chats and commands" spellcheck="false" autocomplete="off">
+      </div>
+      <nav id="chat-list" aria-label="Past chats"></nav>
+      <div class="side-bottom">
+        <span id="status" class="status" title="Ollama connection"><i></i><span>checking</span></span>
+        <button id="open-settings" class="link-btn" title="Settings (Ctrl+,)">Settings</button>
+      </div>
+    </aside>
+
+    <main id="main">
+      <header id="top">
+        <button id="toggle-side" class="link-btn" title="Toggle sidebar" aria-label="Toggle sidebar">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2"/><path d="M6 3v10"/></svg>
+        </button>
+        <input id="title" value="New chat" spellcheck="false" aria-label="Chat title">
+        <div class="spacer"></div>
+        <button id="cwd" class="chip chat-only" title="Working directory. Click to change.">~</button>
+        <button id="auto" class="chip chat-only" title="When on, the AI's commands run without asking">Ask first</button>
+        <button id="copy-chat" class="chip chat-only">Copy chat</button>
+        <button id="export-chat" class="chip chat-only">Export</button>
+        <div class="seg" role="group" aria-label="View">
+          <button data-view="chat" title="AI chat">Chat</button>
+          <button data-view="split" title="Chat and terminal (Ctrl+`)">Split</button>
+          <button data-view="term" title="Terminal only">Terminal</button>
+        </div>
+      </header>
+
+      <div id="work">
+        <section id="chatpane">
+          <div id="scroll">
+            <div id="messages"></div>
+          </div>
+
+          <footer id="composer">
+            <div class="composer-box">
+              <textarea id="input" rows="1" placeholder="Ask for something to be done" spellcheck="true"></textarea>
+              <button id="send" class="send" title="Send" aria-label="Send">
+                <svg class="i-send" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg>
+                <svg class="i-stop" width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><rect x="2" y="2" width="10" height="10" rx="1.5"/></svg>
+              </button>
+            </div>
+            <div class="hint">Enter to send, Shift+Enter for a new line. Commands run on this computer.</div>
+          </footer>
+        </section>
+
+        <section id="termpanel" aria-label="Terminal">
+          <div id="term-resize" title="Drag to resize"></div>
+          <div id="term-head">
+            <div id="term-tabs" role="tablist"></div>
+            <button id="term-new" class="link-btn" title="New terminal (Ctrl+Shift+T)" aria-label="New terminal">+</button>
+            <div class="spacer"></div>
+            <button id="term-ask" class="chip" title="Send the selected text (or the last lines) to the AI">Ask AI about this</button>
+            <button id="term-hide" class="link-btn" title="Hide terminal (Ctrl+`)">Hide</button>
+          </div>
+          <div id="term-body"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div id="modal" hidden>
+    <div class="panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <h2 id="settings-title">Settings</h2>
+
+      <label>Model
+        <input id="s-model" list="model-list" spellcheck="false" autocomplete="off">
+        <datalist id="model-list"></datalist>
+      </label>
+      <label>Ollama address
+        <input id="s-host" spellcheck="false" autocomplete="off">
+      </label>
+
+      <div class="row3">
+        <label>Context size
+          <input id="s-ctx" type="number" min="1024" step="1024">
+        </label>
+        <label>Commands per message
+          <input id="s-steps" type="number" min="1" max="100">
+        </label>
+        <label>Command timeout (s)
+          <input id="s-timeout" type="number" min="5" max="3600">
+        </label>
+      </div>
+
+      <div class="row3">
+        <label>Terminal font size
+          <input id="s-termfont" type="number" min="9" max="28">
+        </label>
+        <label>Shell (blank for default)
+          <input id="s-shell" placeholder="/bin/bash" spellcheck="false" autocomplete="off">
+        </label>
+        <label>Start Ollama automatically
+          <select id="s-autoollama">
+            <option value="yes">Yes</option>
+            <option value="no">No</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="row2">
+        <label>Theme
+          <select id="s-theme">
+            <option value="dark">Black</option>
+            <option value="light">White</option>
+          </select>
+        </label>
+        <label>Start new chats in
+          <span class="dir-pick"><input id="s-dir" spellcheck="false" autocomplete="off"><button id="s-dir-pick" class="btn small" type="button">Browse</button></span>
+        </label>
+      </div>
+
+      <label>Your instructions for the AI
+        <textarea id="s-instr" rows="8" spellcheck="false"></textarea>
+      </label>
+
+      <div class="panel-actions">
+        <button id="s-reset" class="btn small" type="button">Reset instructions</button>
+        <div class="spacer"></div>
+        <button id="s-cancel" class="btn" type="button">Cancel</button>
+        <button id="s-save" class="btn solid" type="button">Save changes</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="node_modules/@xterm/xterm/lib/xterm.js"></script>
+  <script src="node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+  <script src="markdown.js"></script>
+  <script src="terminal.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>
