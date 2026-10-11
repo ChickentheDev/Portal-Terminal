@@ -16,7 +16,7 @@ Adds **Portal Terminal** to your applications menu. Requires Node.js + Python 3.
 
 ### Option 2 — AppImage (no install needed)
 
-Download the `.AppImage` from [Releases](https://github.com/yourusername/portal-terminal/releases), then:
+Download the `.AppImage` from [Releases](https://github.com/chickenthedev/portal-terminal/releases), then:
 
 ```bash
 chmod +x Portal-Terminal-*.AppImage
