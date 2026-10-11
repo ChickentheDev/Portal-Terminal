@@ -1,6 +1,6 @@
 # Portal Terminal
 
-A black and white desktop app with two ways to work: chat with a local Ollama model (default `gpt-oss:20b`) that can run commands for you, or use the built-in terminal yourself. Use both side by side.
+chat with a local Ollama model (default `gpt-oss:20b`) that can run commands for you, or use the built-in terminal yourself. Use both side by side.
 
 ![Portal Terminal icon](icon.png)
 
@@ -38,15 +38,13 @@ sudo rpm -i portal-terminal-*.rpm
 # or
 sudo dnf install ./portal-terminal-*.rpm
 ```
-
+(the RPM is not currently available as i am on steam os and i am too lazy to install the stuff i need to make it)
 ### Option 5 — Flatpak
 
 ```bash
 flatpak-builder --user --install --force-clean build-dir org.portalterminal.PortalTerminal.yml
 flatpak run org.portalterminal.PortalTerminal
 ```
-
-(You can also publish the Flatpak to a repository later.)
 
 ---
 
