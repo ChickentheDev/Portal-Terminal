@@ -1,7 +1,37 @@
+/* Portal Terminal — hybrid: Warp neon + Grok cards */
 :root {
   --sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
   --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  --neon-teal: #48e0c2;
+  --neon-purple: #b27bff;
+  --neon-blue: #5fb0ff;
+  --card-radius: 16px;
+  --glass: rgba(255,255,255,0.04);
 }
+
+/* ---------- Cards (Grok-style rounded containers) ---------- */
+.card {
+  background: linear-gradient(180deg, rgba(23,42,62,0.85) 0%, rgba(15,26,42,0.95) 100%);
+  border: 1px solid rgba(72,224,194,0.15);
+  border-radius: var(--card-radius);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.06);
+  padding: 16px 18px;
+  transition: border-color .2s ease, box-shadow .2s ease;
+}
+.card:hover { border-color: rgba(72,224,194,0.35); box-shadow: 0 8px 40px rgba(72,224,194,0.08), inset 0 1px 0 rgba(255,255,255,0.08); }
+
+/* ---------- Neon accents (Warp-style) ---------- */
+.btn-neon {
+  font: 600 14px var(--font);
+  min-width: 120px; padding: 10px 20px; border-radius: 12px;
+  border: 1.5px solid rgba(72,224,194,0.25);
+  background: linear-gradient(180deg, rgba(72,224,194,0.12) 0%, rgba(45,187,160,0.18) 100%);
+  color: var(--neon-teal); text-shadow: 0 0 12px rgba(72,224,194,0.4);
+  transition: all .15s ease;
+}
+.btn-neon:hover { background: linear-gradient(180deg, rgba(72,224,194,0.22) 0%, rgba(45,187,160,0.28) 100%); border-color: rgba(72,224,194,0.55); box-shadow: 0 0 16px rgba(72,224,194,0.25); }
 
 body[data-theme="dark"] {
   --bg: #000;
