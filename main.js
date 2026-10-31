@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog, clipboard, shell, Menu } = require(
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
 
 // Linux (including SteamOS) often can't use Chromium's SUID sandbox for a
@@ -42,7 +43,6 @@ function resourcePath(...parts) {
   return candidates[0];
 }
 
-const CWD_MARKER = '__CWD_MARKER__';
 const MAX_OUTPUT_CHARS = 6000;
 
 const DEFAULT_INSTRUCTIONS = `You are a friendly, careful assistant chatting with the user and working in their terminal.
@@ -70,6 +70,13 @@ const DEFAULT_SETTINGS = {
 
 const BLOCKED_PATTERNS = [
   /\brm\s+(-[a-zA-Z]*r[a-zA-Z]*\s+)?(-[a-zA-Z]*f[a-zA-Z]*\s+)?(\/|~|\$HOME)\s*($|;|&)/i,
+  // rm with a recursive flag aimed at an absolute path, ~, $HOME, or bare . / ..
+  /\brm\b[^;&|\n]*-[a-zA-Z]*[rR][^;&|\n]*\s(?:\/(?:[^\s;&|]*)?|~(?:\/[^\s;&|]*)?|\$HOME(?:\/[^\s;&|]*)?|\.(?=\s|$|[;&|])|\.\.(?=\s|$|[;&|]))(?=\s|$|[;&|])/i,
+  // rm with a recursive flag + a glob
+  /\brm\b[^;&|\n]*-[a-zA-Z]*[rR][^;&|\n]*\*/i,
+  // find ... -delete / -exec rm
+  /\bfind\b[^;&|\n]*\s-delete\b/i,
+  /\bfind\b[^;&|\n]*-exec\s+rm\b/i,
   /\bmkfs\b/i,
   /\bdd\b.*\bof=\/dev\//i,
   /:\(\)\s*\{.*\};\s*:/,
@@ -125,6 +132,9 @@ function saveSettings() {
 
 const chatPath = (id) => path.join(chatsDir, String(id).replace(/[^a-z0-9]/gi, '') + '.json');
 const readChat = (id) => JSON.parse(fs.readFileSync(chatPath(id), 'utf8'));
+// Null (not a throw) for unknown/deleted chat ids — IPC handlers must not
+// turn a stale renderer reference into an unhandled rejection.
+const getChatOrNull = (id) => { try { return readChat(id); } catch { return null; } };
 function writeChat(chat) {
   chat.updated = Date.now();
   fs.writeFileSync(chatPath(chat.id), JSON.stringify(chat));
@@ -268,13 +278,20 @@ function killTree(child) {
 function runShell(command, cwd, st) {
   return new Promise((resolve) => {
     if (!fs.existsSync(cwd)) cwd = os.homedir();
+    // Random marker per invocation: command output can be attacker-influenced
+    // (curl, cat of untrusted files), so a fixed marker would let output
+    // hijack the tracked working directory for all later commands.
+    const marker = '__CWD_' + crypto.randomBytes(8).toString('hex') + '__';
     let bin, argv;
     if (IS_WIN) {
       bin = 'powershell';
-      argv = ['-NoProfile', '-Command', `${command}\nWrite-Output "${CWD_MARKER}$((Get-Location).Path)"`];
+      // -EncodedCommand (base64 UTF-16LE): a raw " in the command can't break
+      // out of PowerShell quoting the way -Command string interpolation can.
+      const ps = `${command}\nWrite-Output "${marker}$((Get-Location).Path)"`;
+      argv = ['-NoProfile', '-EncodedCommand', Buffer.from(ps, 'utf16le').toString('base64')];
     } else {
       bin = 'bash';
-      argv = ['-c', `${command}\n__rc=$?\necho "${CWD_MARKER}$(pwd)"\nexit $__rc`];
+      argv = ['-c', `${command}\n__rc=$?\necho "${marker}$(pwd)"\nexit $__rc`];
     }
     let child;
     try {
@@ -299,8 +316,14 @@ function runShell(command, cwd, st) {
       let newCwd = cwd;
       const lines = [];
       for (const line of out.split('\n')) {
-        if (line.startsWith(CWD_MARKER)) newCwd = line.slice(CWD_MARKER.length).trim() || cwd;
-        else lines.push(line);
+        if (line.startsWith(marker)) {
+          // Only accept the parsed path if it's a real directory; otherwise
+          // keep the previous cwd (a forged marker can't redirect us).
+          const p = line.slice(marker.length).trim();
+          if (p) {
+            try { if (fs.statSync(p).isDirectory()) newCwd = p; } catch {}
+          }
+        } else lines.push(line);
       }
       let text = lines.join('\n').replace(/\s+$/, '');
       if (err.trim()) text += `\n[stderr]\n${err.trim()}`;
@@ -357,7 +380,8 @@ async function handleCall(chat, st, call, add) {
 }
 
 async function runTurn(chatId, text) {
-  const chat = readChat(chatId);
+  const chat = getChatOrNull(chatId);
+  if (!chat) return;
   const st = { abort: new AbortController(), child: null, approval: null, exec: null, stopped: false };
   live.set(chatId, st);
   const add = (m) => {
@@ -484,7 +508,8 @@ function registerIpc() {
   ipcMain.handle('chats:list', (_e, q) => listChats(q));
   ipcMain.handle('chats:new', () => newChat());
   ipcMain.handle('chats:get', (_e, id) => {
-    const chat = readChat(id);
+    const chat = getChatOrNull(id);
+    if (!chat) return null;
     const st = live.get(id);
     return {
       chat,
@@ -497,7 +522,8 @@ function registerIpc() {
     return true;
   });
   ipcMain.handle('chats:rename', (_e, id, title) => {
-    const chat = readChat(id);
+    const chat = getChatOrNull(id);
+    if (!chat) return null;
     chat.title = String(title || '').trim().slice(0, 120) || 'Untitled';
     const t = chat.updated;
     writeChat(chat);
@@ -505,9 +531,13 @@ function registerIpc() {
     fs.writeFileSync(chatPath(id), JSON.stringify(chat));
     return chat.title;
   });
-  ipcMain.handle('chats:markdown', (_e, id) => chatToMarkdown(readChat(id)));
+  ipcMain.handle('chats:markdown', (_e, id) => {
+    const chat = getChatOrNull(id);
+    return chat ? chatToMarkdown(chat) : null;
+  });
   ipcMain.handle('chats:export', async (_e, id) => {
-    const chat = readChat(id);
+    const chat = getChatOrNull(id);
+    if (!chat) return null;
     const safe = chat.title.replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-').slice(0, 40) || 'chat';
     const r = await dialog.showSaveDialog(win, {
       defaultPath: path.join(os.homedir(), `${safe}.md`),
@@ -518,7 +548,8 @@ function registerIpc() {
     return true;
   });
   ipcMain.handle('chat:pickCwd', async (_e, id) => {
-    const chat = readChat(id);
+    const chat = getChatOrNull(id);
+    if (!chat) return null;
     const r = await dialog.showOpenDialog(win, { defaultPath: chat.cwd, properties: ['openDirectory'] });
     if (r.canceled || !r.filePaths[0]) return chat.cwd;
     chat.cwd = r.filePaths[0];
