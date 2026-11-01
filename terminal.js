@@ -140,6 +140,12 @@
       rows: term.rows,
       cwd: cwd || (T.opts.getCwd && T.opts.getCwd()),
     });
+    // The tab may have been closed while creation was in flight — kill the
+    // orphaned pty instead of attaching it to a dead tab.
+    if (tab.dead || !T.tabs.includes(tab)) {
+      if (res && res.id) { try { window.api.termKill(res.id); } catch {} }
+      return tab;
+    }
     if (res.error) {
       term.write('\r\n' + res.error + '\r\n');
       tab.dead = true;
@@ -157,6 +163,7 @@
   }
 
   function closeTab(tab) {
+    tab.dead = true;
     if (tab.id) window.api.termKill(tab.id);
     try { tab.term.dispose(); } catch {}
     tab.pane.remove();
