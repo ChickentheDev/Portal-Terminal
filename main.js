@@ -77,6 +77,13 @@ const BLOCKED_PATTERNS = [
   // find ... -delete / -exec rm
   /\bfind\b[^;&|\n]*\s-delete\b/i,
   /\bfind\b[^;&|\n]*-exec\s+rm\b/i,
+  // destructive calls routed through scripting interpreters (the literal-text
+  // patterns above can't see through `python -c`, `node -e`, etc.)
+  /shutil\.rmtree\s*\(/i,
+  /\brmtree\s*\(/i,
+  /\.rmSync\s*\(/i,
+  /\bos\.(remove|unlink|rmdir)\s*\(/i,
+  /-EncodedCommand/i,
   /\bmkfs\b/i,
   /\bdd\b.*\bof=\/dev\//i,
   /:\(\)\s*\{.*\};\s*:/,
@@ -270,7 +277,7 @@ const isBlocked = (cmd) => BLOCKED_PATTERNS.some((re) => re.test(cmd));
 function killTree(child) {
   if (!child || !child.pid) return;
   try {
-    if (IS_WIN) spawn('taskkill', ['/pid', String(child.pid), '/T', '/F']);
+    if (IS_WIN) spawn('taskkill', ['/pid', String(child.pid), '/T', '/F']).on('error', () => {});
     else process.kill(-child.pid, 'SIGKILL');
   } catch {}
 }
@@ -566,6 +573,7 @@ function registerIpc() {
 
   ipcMain.handle('chat:send', (_e, id, text) => {
     if (live.has(id)) return false;
+    if (!getChatOrNull(id)) return false; // chat file gone: don't strand the spinner
     runTurn(id, String(text || ''));
     return true;
   });
