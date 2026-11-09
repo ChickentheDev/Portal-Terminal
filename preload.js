@@ -1,7 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 const inv = (channel, ...args) => ipcRenderer.invoke(channel, ...args);
-const EVENTS = ['stream', 'message', 'approval', 'running', 'done', 'error', 'chat-updated', 'auto', 'term-data', 'term-exit'];
+const EVENTS = ['stream', 'message', 'approval', 'running', 'done', 'error', 'chat-updated', 'auto', 'term-data', 'term-exit', 'ollama:pull-progress'];
 
 contextBridge.exposeInMainWorld('api', {
   getSettings: () => inv('settings:get'),
@@ -25,6 +25,8 @@ contextBridge.exposeInMainWorld('api', {
   getAuto: () => inv('auto:get'),
   setAuto: (v) => inv('auto:set', v),
   status: () => inv('ollama:status'),
+  agentModels: () => inv('models:agents'),
+  pullModel: (name) => inv('ollama:pull', name),
   copy: (text) => inv('clipboard:write', text),
   paste: () => inv('clipboard:read'),
 

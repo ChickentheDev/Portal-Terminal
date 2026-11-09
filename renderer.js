@@ -24,6 +24,7 @@
     working: null,
     stick: true,
     status: { ok: false, models: [] },
+    agents: [], // known agent models (Hermes first) from main
   };
 
   const suggestions = [
@@ -385,6 +386,7 @@
 
   async function openChat(id) {
     const r = await window.api.getChat(id);
+    if (!r || !r.chat) { await startNewChat(true); return; }
     S.cur = r.chat;
     renderHeader();
     renderAll();
@@ -463,7 +465,10 @@
 
     on('chat-updated', (p) => {
       if (S.cur && p.chatId === S.cur.id) {
-        window.api.getChat(p.chatId).then((r) => { S.cur.title = r.chat.title; titleEl.value = r.chat.title; });
+        window.api.getChat(p.chatId).then((r) => {
+          if (!r || !r.chat || !S.cur) return;
+          S.cur.title = r.chat.title; titleEl.value = r.chat.title;
+        });
       }
       refreshList();
     });
@@ -472,6 +477,22 @@
   }
 
   /* ---------- settings ---------- */
+
+  function refreshModelList() {
+    const dl = $('#model-list');
+    dl.innerHTML = '';
+    const seen = new Set();
+    for (const m of S.status.models) { seen.add(m); const o = document.createElement('option'); o.value = m; dl.append(o); }
+    // Agent presets (Hermes first) so the model is pickable before it's pulled.
+    for (const a of S.agents) {
+      if (seen.has(a.name)) continue;
+      seen.add(a.name);
+      const o = document.createElement('option');
+      o.value = a.name;
+      o.label = a.label;
+      dl.append(o);
+    }
+  }
 
   async function openSettings() {
     const s = S.settings;
@@ -486,13 +507,36 @@
     $('#s-termfont').value = s.termFont;
     $('#s-shell').value = s.shell || '';
     $('#s-autoollama').value = s.autoOllama === false ? 'no' : 'yes';
-    const dl = $('#model-list');
-    dl.innerHTML = '';
-    for (const m of S.status.models) { const o = document.createElement('option'); o.value = m; dl.append(o); }
+    refreshModelList();
     $('#modal').hidden = false;
     $('#s-model').focus();
   }
   const closeSettings = () => ($('#modal').hidden = true);
+
+  async function pullModel() {
+    const btn = $('#s-model-pull');
+    const name = $('#s-model').value.trim();
+    if (!name || btn.disabled) return;
+    btn.disabled = true;
+    btn.textContent = 'Pulling…';
+    const off = window.api.on('ollama:pull-progress', (p) => {
+      if (p.model !== name) return;
+      btn.textContent = p.total > 0 ? `Pulling… ${Math.round((p.completed / p.total) * 100)}%` : `Pulling… ${p.status}`;
+    });
+    const r = await window.api.pullModel(name);
+    off();
+    btn.disabled = false;
+    if (r.ok) {
+      btn.textContent = 'Pulled';
+      setTimeout(() => (btn.textContent = 'Pull model'), 2500);
+      await pollStatus();
+      refreshModelList();
+    } else {
+      btn.textContent = 'Pull failed';
+      setTimeout(() => (btn.textContent = 'Pull model'), 3000);
+      alert('Could not pull ' + name + ':\n' + (r.error || 'unknown error'));
+    }
+  }
 
   async function saveSettings() {
     S.settings = await window.api.setSettings({
@@ -536,6 +580,7 @@
     $('#open-settings').onclick = openSettings;
     $('#s-cancel').onclick = closeSettings;
     $('#s-save').onclick = saveSettings;
+    $('#s-model-pull').onclick = pullModel;
     $('#s-reset').onclick = async () => { $('#s-instr').value = await window.api.defaultInstructions(); };
     $('#s-dir-pick').onclick = async () => { const d = await window.api.pickDir(); if (d) $('#s-dir').value = d; };
     $('#modal').addEventListener('mousedown', (e) => { if (e.target.id === 'modal') closeSettings(); });
@@ -610,6 +655,7 @@
 
   async function init() {
     S.settings = await window.api.getSettings();
+    S.agents = await window.api.agentModels();
     applyTheme();
     S.auto = await window.api.getAuto();
     renderAuto();

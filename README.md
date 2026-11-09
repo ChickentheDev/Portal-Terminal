@@ -1,6 +1,6 @@
 # Portal Terminal
 
-chat with a local Ollama model (default `gpt-oss:20b`) that can run commands for you, or use the built-in terminal yourself. Use both side by side.
+chat with a local Ollama model (default agent: Hermes 3 `hermes3:8b`) that can run commands for you, or use the built-in terminal yourself. Use both side by side.
 
 ![Portal Terminal icon](icon.png)
 

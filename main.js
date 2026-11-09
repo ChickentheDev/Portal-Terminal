@@ -56,7 +56,7 @@ const DEFAULT_INSTRUCTIONS = `You are a friendly, careful assistant chatting wit
 
 const DEFAULT_SETTINGS = {
   host: 'http://127.0.0.1:11434',
-  model: 'gpt-oss:20b',
+  model: 'hermes3:8b',
   ctx: 8192,
   maxSteps: 15,
   timeout: 120,
@@ -67,6 +67,17 @@ const DEFAULT_SETTINGS = {
   shell: '',
   autoOllama: true,
 };
+
+// Agent models: the terminal agent runs on one of these via Ollama.
+// Hermes 3 (Nous Research) is the default agent — built for function
+// calling and agentic use (ollama.com/library/hermes3: tools, 128K ctx;
+// tags 3b / 8b / 70b / 405b). gpt-oss:20b is the previous default.
+const AGENT_MODELS = [
+  { name: 'hermes3:8b', label: 'Hermes 3 8B — recommended agent' },
+  { name: 'hermes3:70b', label: 'Hermes 3 70B' },
+  { name: 'hermes3:3b', label: 'Hermes 3 3B — smallest' },
+  { name: 'gpt-oss:20b', label: 'GPT-OSS 20B — previous default' },
+];
 
 const BLOCKED_PATTERNS = [
   /\brm\s+(-[a-zA-Z]*r[a-zA-Z]*\s+)?(-[a-zA-Z]*f[a-zA-Z]*\s+)?(\/|~|\$HOME)\s*($|;|&)/i,
@@ -114,6 +125,8 @@ let chatsDir, settingsFile;
 let settings = { ...DEFAULT_SETTINGS };
 let autoRun = false; // never persisted: every launch starts in "ask first" mode
 const live = new Map(); // chatId -> { abort, child, approval, exec, stopped }
+const deletedChats = new Set(); // chat ids deleted while a run was in flight —
+// a run's add() must not recreate the file via writeChat after the user deleted it
 const pendingApprovals = new Map(); // callId -> resolve(decision)
 const terms = new Map(); // terminal id -> child process (pty bridge)
 let termSeq = 0;
@@ -126,9 +139,19 @@ const send = (channel, payload) => {
 
 /* ---------- storage ---------- */
 
+// "localhost:11434" (no scheme) makes every fetch throw "Failed to parse URL".
+// Accept it and assume http — the address field is free text.
+const normHost = (h) => {
+  const s = String(h || '').trim();
+  if (!s) return DEFAULT_SETTINGS.host;
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? s : 'http://' + s;
+};
+
 function loadSettings() {
   try {
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(fs.readFileSync(settingsFile, 'utf8')) };
+    const s = { ...DEFAULT_SETTINGS, ...JSON.parse(fs.readFileSync(settingsFile, 'utf8')) };
+    s.host = normHost(s.host);
+    return s;
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
@@ -388,12 +411,14 @@ async function handleCall(chat, st, call, add) {
 
 async function runTurn(chatId, text) {
   const chat = getChatOrNull(chatId);
-  if (!chat) return;
+  if (!chat) { send('done', { chatId }); return; }
   const st = { abort: new AbortController(), child: null, approval: null, exec: null, stopped: false };
   live.set(chatId, st);
   const add = (m) => {
     chat.messages.push(m);
-    writeChat(chat);
+    // Don't resurrect a chat the user deleted mid-run: deleting unlinks the
+    // file, but this in-flight turn would otherwise recreate it on next add().
+    if (!deletedChats.has(chat.id)) writeChat(chat);
     send('message', { chatId, message: m });
   };
   let partial = null;
@@ -431,6 +456,7 @@ async function runTurn(chatId, text) {
     }
   } finally {
     live.delete(chatId);
+    deletedChats.delete(chatId);
     send('done', { chatId });
   }
 }
@@ -499,7 +525,7 @@ function registerIpc() {
     next.ctx = Math.max(1024, Number(next.ctx) || 8192);
     next.maxSteps = Math.max(1, Number(next.maxSteps) || 15);
     next.timeout = Math.max(5, Number(next.timeout) || 120);
-    next.host = String(next.host || DEFAULT_SETTINGS.host).trim();
+    next.host = normHost(next.host);
     next.model = String(next.model || DEFAULT_SETTINGS.model).trim();
     if (!next.instructions || !String(next.instructions).trim()) next.instructions = DEFAULT_INSTRUCTIONS;
     if (!next.startDir || !fs.existsSync(next.startDir)) next.startDir = os.homedir();
@@ -525,6 +551,7 @@ function registerIpc() {
   });
   ipcMain.handle('chats:delete', (_e, id) => {
     stopChat(id);
+    deletedChats.add(id);
     try { fs.unlinkSync(chatPath(id)); } catch {}
     return true;
   });
@@ -597,6 +624,49 @@ function registerIpc() {
       return { ok: true, models: (j.models || []).map((m) => m.name) };
     } catch {
       return { ok: false, models: [] };
+    }
+  });
+
+  ipcMain.handle('models:agents', () => AGENT_MODELS);
+
+  // Download a model into Ollama (e.g. hermes3:8b on first use). Streams
+  // progress events to the renderer; resolves when the pull finishes.
+  ipcMain.handle('ollama:pull', async (_e, name) => {
+    const model = String(name || settings.model || '').trim();
+    if (!model) return { ok: false, error: 'No model name.' };
+    try {
+      const res = await fetch(settings.host.replace(/\/$/, '') + '/api/pull', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: model, stream: true }),
+      });
+      if (!res.ok) {
+        let t = '';
+        try { t = await res.text(); } catch {}
+        return { ok: false, error: `Ollama returned ${res.status}. ${t.slice(0, 200)}` };
+      }
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, idx);
+          buf = buf.slice(idx + 1);
+          if (!line.trim()) continue;
+          let j;
+          try { j = JSON.parse(line); } catch { continue; }
+          if (j.error) return { ok: false, error: j.error };
+          if (j.status) send('ollama:pull-progress', { model, status: j.status, completed: j.completed || 0, total: j.total || 0 });
+        }
+      }
+      return { ok: true };
+    } catch (e) {
+      const msg = String((e && e.message) || e);
+      return { ok: false, error: /fetch failed|ECONNREFUSED/i.test(msg) ? `Could not reach Ollama at ${settings.host}.` : msg };
     }
   });
 

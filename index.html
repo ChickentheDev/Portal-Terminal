@@ -77,9 +77,10 @@
     <div class="panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <h2 id="settings-title">Settings</h2>
 
-      <label>Model
-        <input id="s-model" list="model-list" spellcheck="false" autocomplete="off">
+      <label>Agent model
+        <span class="dir-pick"><input id="s-model" list="model-list" spellcheck="false" autocomplete="off"><button id="s-model-pull" class="btn small" type="button">Pull model</button></span>
         <datalist id="model-list"></datalist>
+        <span class="field-hint">Hermes 3 is the default agent. Pull downloads it into Ollama (8B is about 4.7 GB).</span>
       </label>
       <label>Ollama address
         <input id="s-host" spellcheck="false" autocomplete="off">
