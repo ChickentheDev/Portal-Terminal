@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.2.1
+
+### New models
+
+The agent can now run on four more Ollama models, each verified as an
+existing tools-capable tag on ollama.com/library: Qwen 2.5 Coder 14B
+(~9 GB), Llama 3.1 8B (~4.9 GB), Mistral Nemo 12B (~7.1 GB), and
+Devstral 24B (~14 GB). Hermes 3 8B stays the default. The command
+palette can switch to any of the eight presets without opening
+settings.
+
+### Customization
+
+- Themes: Warp Dark, Dracula, Nord, Solarized Dark, and One Dark join
+  Black (still the default) and White. Each theme is a full token set
+  for the app and the terminal.
+- Custom accent color: pick any color to override the theme accent,
+  or reset to the theme's own accent.
+- Fonts: family (System Mono, JetBrains Mono, Fira Code, IBM Plex
+  Mono) and size, separately for the terminal and the chat.
+- Command palette (Ctrl+K): fuzzy search over every action — new
+  chat, switch views, new terminal tab, toggle sidebar, settings,
+  copy/export chat, ask AI about the terminal selection, pull the
+  current model, toggle auto-run, switch agent model, focus chat
+  input or search. Arrow keys + Enter + Esc + click.
+
+### Warp-style terminal
+
+Commands are grouped into blocks in a rail above the terminal: each
+block shows the command, Copy and Rerun buttons, and status/duration
+(running blocks in the theme accent, finished blocks with wall time,
+Ctrl+C marks a block Cancelled). A Blocks button in the terminal
+header shows the count and hides the rail. Note: without shell
+integration, a block is running until the next command is submitted
+and duration is wall time between submits — exit codes are not shown.
+
 ## 0.2.0
 
 ### Security

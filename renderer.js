@@ -60,8 +60,36 @@
     S.stick = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 80;
   });
 
+  // Font family keys (settings) -> CSS stacks. 'system' is the platform
+  // default: sans for chat, mono for the terminal.
+  const MONO_STACKS = {
+    system: 'ui-monospace, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace',
+    jetbrains: '"JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace',
+    fira: '"Fira Code", ui-monospace, "SF Mono", Menlo, Consolas, monospace',
+    plex: '"IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace',
+  };
+  const SANS_STACK = '"Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif';
+  const monoStack = (key) => MONO_STACKS[key] || MONO_STACKS.system;
+  const chatStack = (key) => (key === 'system' ? SANS_STACK : monoStack(key));
+  // Each theme's own accent, for the color input when no custom accent is set.
+  const THEME_ACCENTS = { dark: '#48e0c2', light: '#48e0c2', 'warp-dark': '#ffc24b', dracula: '#bd93f9', nord: '#88c0d0', 'solarized-dark': '#2aa198', 'one-dark': '#61afef' };
+  let accentCustom = false; // true once the user picks a custom accent color
+
   function applyTheme() {
-    document.body.dataset.theme = S.settings.theme === 'light' ? 'light' : 'dark';
+    document.body.dataset.theme = S.settings.theme || 'dark';
+    // custom accent overrides the theme accent; empty = the theme's own
+    if (S.settings.accent) document.body.style.setProperty('--neon-teal', S.settings.accent);
+    else document.body.style.removeProperty('--neon-teal');
+    applyFonts();
+    window.TermUI.updateTheme();
+  }
+
+  function applyFonts() {
+    document.body.style.setProperty('--chat-size', (S.settings.chatFont || 15) + 'px');
+    document.body.style.setProperty('--chat-font', chatStack(S.settings.chatFontFamily));
+    document.body.style.setProperty('--mono', monoStack(S.settings.termFontFamily));
+    window.TermUI.setFont(S.settings.termFont);
+    window.TermUI.setFontFamily(monoStack(S.settings.termFontFamily));
   }
 
   /* ---------- sidebar ---------- */
@@ -502,6 +530,11 @@
     $('#s-steps').value = s.maxSteps;
     $('#s-timeout').value = s.timeout;
     $('#s-theme').value = s.theme;
+    accentCustom = !!s.accent;
+    $('#s-accent').value = s.accent || THEME_ACCENTS[s.theme] || '#48e0c2';
+    $('#s-termfontfam').value = s.termFontFamily || 'system';
+    $('#s-chatfontfam').value = s.chatFontFamily || 'system';
+    $('#s-chatfont').value = s.chatFont || 15;
     $('#s-dir').value = s.startDir;
     $('#s-instr').value = s.instructions;
     $('#s-termfont').value = s.termFont;
@@ -546,6 +579,10 @@
       maxSteps: $('#s-steps').value,
       timeout: $('#s-timeout').value,
       theme: $('#s-theme').value,
+      accent: accentCustom ? $('#s-accent').value : '',
+      termFontFamily: $('#s-termfontfam').value,
+      chatFontFamily: $('#s-chatfontfam').value,
+      chatFont: $('#s-chatfont').value,
       startDir: $('#s-dir').value,
       instructions: $('#s-instr').value,
       termFont: $('#s-termfont').value,
@@ -553,10 +590,88 @@
       autoOllama: $('#s-autoollama').value === 'yes',
     });
     applyTheme();
-    window.TermUI.updateTheme();
-    window.TermUI.setFont(S.settings.termFont);
     closeSettings();
     pollStatus();
+  }
+
+  /* ---------- command palette (Ctrl+K) ---------- */
+
+  function paletteActions() {
+    const acts = [
+      { label: 'New chat', keys: 'Ctrl+N', run: () => startNewChat(false) },
+      { label: 'Switch to Chat view', run: () => window.TermUI.setView('chat') },
+      { label: 'Switch to Split view', run: () => window.TermUI.setView('split') },
+      { label: 'Switch to Terminal view', run: () => window.TermUI.setView('term') },
+      { label: 'New terminal tab', keys: 'Ctrl+Shift+T', run: () => window.TermUI.newTab() },
+      { label: 'Toggle sidebar', run: () => $('#sidebar').classList.toggle('hidden') },
+      { label: 'Open settings', keys: 'Ctrl+,', run: () => openSettings() },
+      { label: 'Copy chat', run: async () => { if (S.cur) copyText(await window.api.chatMarkdown(S.cur.id)); } },
+      { label: 'Export chat', run: () => { if (S.cur && S.cur.messages.length) window.api.exportChat(S.cur.id); } },
+      { label: 'Ask AI about terminal selection', run: () => { window.TermUI.setView('split', { focus: false }); window.TermUI.askAi(); } },
+      { label: 'Pull current agent model', run: () => { openSettings(); pullModel(); } },
+      { label: 'Toggle auto-run', run: async () => { S.auto = await window.api.setAuto(!S.auto); renderAuto(); } },
+      { label: 'Focus chat input', run: () => $('#input').focus() },
+      { label: 'Focus search', run: () => { $('#sidebar').classList.remove('hidden'); $('#search').focus(); } },
+    ];
+    for (const a of S.agents || []) {
+      acts.push({
+        label: `Switch agent model to ${a.label}`,
+        keywords: a.name,
+        run: async () => { S.settings = await window.api.setSettings({ model: a.name }); pollStatus(); },
+      });
+    }
+    return acts;
+  }
+
+  // Subsequence fuzzy match; tighter runs and prefix matches score higher.
+  function fuzzyScore(q, text) {
+    q = q.toLowerCase(); text = text.toLowerCase();
+    let qi = 0, score = 0, last = -2;
+    for (let i = 0; i < text.length && qi < q.length; i++) {
+      if (text[i] === q[qi]) { score += last === i - 1 ? 2 : 1; last = i; qi++; }
+    }
+    if (qi < q.length) return -1;
+    return score + (text.startsWith(q) ? 5 : 0);
+  }
+
+  const PAL = { items: [], shown: [], active: 0 };
+  function openPalette() {
+    PAL.items = paletteActions();
+    PAL.active = 0;
+    $('#palette').hidden = false;
+    const input = $('#palette-input');
+    input.value = '';
+    renderPalette('');
+    input.focus();
+  }
+  const closePalette = () => { $('#palette').hidden = true; };
+  const paletteOpen = () => !$('#palette').hidden;
+
+  function renderPalette(q) {
+    const list = $('#palette-list');
+    PAL.shown = PAL.items
+      .map((a) => ({ a, s: q ? fuzzyScore(q, a.label + ' ' + (a.keywords || '')) : 1 }))
+      .filter((x) => x.s >= 0)
+      .sort((x, y) => y.s - x.s)
+      .map((x) => x.a);
+    if (PAL.active >= PAL.shown.length) PAL.active = Math.max(0, PAL.shown.length - 1);
+    list.innerHTML = '';
+    if (!PAL.shown.length) { list.append(el('div', 'pal-empty', 'No matching command.')); return; }
+    PAL.shown.forEach((a, i) => {
+      const b = el('button', 'pal-item' + (i === PAL.active ? ' active' : ''));
+      b.setAttribute('role', 'option');
+      const t = el('span'); t.textContent = a.label; b.append(t);
+      if (a.keys) { const k = el('span', 'pal-keys'); k.textContent = a.keys; b.append(k); }
+      b.onclick = () => { closePalette(); a.run(); };
+      list.append(b);
+    });
+  }
+
+  function paletteKey(e) {
+    if (e.key === 'ArrowDown') { e.preventDefault(); PAL.active = Math.min((PAL.shown.length || 1) - 1, PAL.active + 1); renderPalette($('#palette-input').value); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); PAL.active = Math.max(0, PAL.active - 1); renderPalette($('#palette-input').value); }
+    else if (e.key === 'Enter') { e.preventDefault(); const a = PAL.shown && PAL.shown[PAL.active]; if (a) { closePalette(); a.run(); } }
+    else if (e.key === 'Escape') { e.preventDefault(); closePalette(); }
   }
 
   async function pollStatus() {
@@ -578,10 +693,22 @@
     $('#new-chat').onclick = () => startNewChat(false);
     $('#toggle-side').onclick = () => $('#sidebar').classList.toggle('hidden');
     $('#open-settings').onclick = openSettings;
+    $('#open-palette').onclick = () => openPalette();
     $('#s-cancel').onclick = closeSettings;
     $('#s-save').onclick = saveSettings;
     $('#s-model-pull').onclick = pullModel;
     $('#s-reset').onclick = async () => { $('#s-instr').value = await window.api.defaultInstructions(); };
+    $('#s-accent').addEventListener('input', () => { accentCustom = true; });
+    $('#s-accent-reset').onclick = () => {
+      accentCustom = false;
+      $('#s-accent').value = THEME_ACCENTS[$('#s-theme').value] || '#48e0c2';
+    };
+    $('#s-theme').addEventListener('change', () => {
+      if (!accentCustom) $('#s-accent').value = THEME_ACCENTS[$('#s-theme').value] || '#48e0c2';
+    });
+    $('#palette-input').addEventListener('input', (e) => { PAL.active = 0; renderPalette(e.target.value); });
+    $('#palette-input').addEventListener('keydown', paletteKey);
+    $('#palette').addEventListener('mousedown', (e) => { if (e.target.id === 'palette') closePalette(); });
     $('#s-dir-pick').onclick = async () => { const d = await window.api.pickDir(); if (d) $('#s-dir').value = d; };
     $('#modal').addEventListener('mousedown', (e) => { if (e.target.id === 'modal') closeSettings(); });
 
@@ -644,10 +771,11 @@
       if (e.target.closest && e.target.closest('#termpanel')) return;
       const mod = e.ctrlKey || e.metaKey;
       if (mod && e.key.toLowerCase() === 'n') { e.preventDefault(); startNewChat(false); }
-      else if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#sidebar').classList.remove('hidden'); $('#search').focus(); $('#search').select(); }
+      else if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); }
       else if (mod && e.key === ',') { e.preventDefault(); openSettings(); }
       else if (e.key === 'Escape') {
-        if (!$('#modal').hidden) closeSettings();
+        if (paletteOpen()) closePalette();
+        else if (!$('#modal').hidden) closeSettings();
         else if (isRunning()) window.api.stop(S.cur.id);
       }
     });
@@ -665,6 +793,7 @@
     await startNewChat(true);
     window.TermUI.init({
       fontSize: S.settings.termFont,
+      fontFamily: monoStack(S.settings.termFontFamily),
       getCwd: () => (S.cur && S.cur.cwd) || S.settings.startDir,
       onAsk: (text) => {
         const block = '```\n' + text + '\n```\n';

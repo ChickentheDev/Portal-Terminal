@@ -13,7 +13,7 @@
     <aside id="sidebar">
       <div class="side-top">
         <button id="new-chat" class="btn block">New chat</button>
-        <input id="search" type="search" placeholder="Search chats and commands" spellcheck="false" autocomplete="off">
+        <input id="search" type="search" placeholder="Search chats" spellcheck="false" autocomplete="off">
       </div>
       <nav id="chat-list" aria-label="Past chats"></nav>
       <div class="side-bottom">
@@ -33,6 +33,7 @@
         <button id="auto" class="chip chat-only" title="When on, the AI's commands run without asking">Ask first</button>
         <button id="copy-chat" class="chip chat-only">Copy chat</button>
         <button id="export-chat" class="chip chat-only">Export</button>
+        <button id="open-palette" class="chip" title="Commands (Ctrl+K)">Commands ⌘K</button>
         <div class="seg" role="group" aria-label="View">
           <button data-view="chat" title="AI chat">Chat</button>
           <button data-view="split" title="Chat and terminal (Ctrl+`)">Split</button>
@@ -64,13 +65,23 @@
             <div id="term-tabs" role="tablist"></div>
             <button id="term-new" class="link-btn" title="New terminal (Ctrl+Shift+T)" aria-label="New terminal">+</button>
             <div class="spacer"></div>
+            <button id="term-blocks-toggle" class="chip" title="Show the command blocks for this terminal">Blocks</button>
             <button id="term-ask" class="chip" title="Send the selected text (or the last lines) to the AI">Ask AI about this</button>
             <button id="term-hide" class="link-btn" title="Hide terminal (Ctrl+`)">Hide</button>
           </div>
+          <div id="term-blocks" hidden></div>
           <div id="term-body"></div>
         </section>
       </div>
     </main>
+  </div>
+
+  <div id="palette" hidden>
+    <div class="palette-panel" role="dialog" aria-modal="true" aria-label="Commands">
+      <input id="palette-input" type="text" placeholder="Type a command…" spellcheck="false" autocomplete="off">
+      <div id="palette-list" role="listbox"></div>
+      <div class="palette-hint">↑↓ navigate · Enter run · Esc close</div>
+    </div>
   </div>
 
   <div id="modal" hidden>
@@ -80,7 +91,7 @@
       <label>Agent model
         <span class="dir-pick"><input id="s-model" list="model-list" spellcheck="false" autocomplete="off"><button id="s-model-pull" class="btn small" type="button">Pull model</button></span>
         <datalist id="model-list"></datalist>
-        <span class="field-hint">Hermes 3 is the default agent. Pull downloads it into Ollama (8B is about 4.7 GB).</span>
+        <span class="field-hint">Hermes 3 8B is the default agent. Pull downloads the model into Ollama — Qwen 2.5 Coder 14B ~9 GB, Llama 3.1 8B ~4.9 GB, Mistral Nemo 12B ~7.1 GB, Devstral 24B ~14 GB.</span>
       </label>
       <label>Ollama address
         <input id="s-host" spellcheck="false" autocomplete="off">
@@ -113,12 +124,43 @@
         </label>
       </div>
 
-      <div class="row2">
+      <div class="row3">
+        <label>Terminal font
+          <select id="s-termfontfam">
+            <option value="system">System Mono</option>
+            <option value="jetbrains">JetBrains Mono</option>
+            <option value="fira">Fira Code</option>
+            <option value="plex">IBM Plex Mono</option>
+          </select>
+        </label>
+        <label>Chat font
+          <select id="s-chatfontfam">
+            <option value="system">System Sans</option>
+            <option value="jetbrains">JetBrains Mono</option>
+            <option value="fira">Fira Code</option>
+            <option value="plex">IBM Plex Mono</option>
+          </select>
+        </label>
+        <label>Chat font size
+          <input id="s-chatfont" type="number" min="12" max="20">
+        </label>
+      </div>
+
+      <div class="row3">
         <label>Theme
           <select id="s-theme">
             <option value="dark">Black</option>
             <option value="light">White</option>
+            <option value="warp-dark">Warp Dark</option>
+            <option value="dracula">Dracula</option>
+            <option value="nord">Nord</option>
+            <option value="solarized-dark">Solarized Dark</option>
+            <option value="one-dark">One Dark</option>
           </select>
+        </label>
+        <label>Accent color
+          <span class="dir-pick"><input id="s-accent" type="color" value="#48e0c2"><button id="s-accent-reset" class="btn small" type="button">Theme accent</button></span>
+          <span class="field-hint">Overrides the theme accent. Reset to use the theme's own accent.</span>
         </label>
         <label>Start new chats in
           <span class="dir-pick"><input id="s-dir" spellcheck="false" autocomplete="off"><button id="s-dir-pick" class="btn small" type="button">Browse</button></span>

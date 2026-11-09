@@ -1,7 +1,7 @@
 {
   "name": "portal-terminal",
   "productName": "Portal Terminal",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Portal Terminal \u2014 a minimal black and white chat app where a local Ollama model can use your terminal.",
   "main": "main.js",
   "author": "Portal Terminal",

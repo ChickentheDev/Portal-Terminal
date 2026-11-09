@@ -60,7 +60,11 @@ const DEFAULT_SETTINGS = {
   ctx: 8192,
   maxSteps: 15,
   timeout: 120,
-  theme: 'dark',
+  theme: 'dark', // black/white is the default theme; see THEMES below
+  accent: '', // custom accent color (#rrggbb) — empty = the theme's accent
+  termFontFamily: 'system', // system | jetbrains | fira | plex
+  chatFontFamily: 'system', // system (sans) | jetbrains | fira | plex
+  chatFont: 15,
   startDir: os.homedir(),
   instructions: DEFAULT_INSTRUCTIONS,
   termFont: 13,
@@ -72,11 +76,21 @@ const DEFAULT_SETTINGS = {
 // Hermes 3 (Nous Research) is the default agent — built for function
 // calling and agentic use (ollama.com/library/hermes3: tools, 128K ctx;
 // tags 3b / 8b / 70b / 405b). gpt-oss:20b is the previous default.
+// Added 2026-11-09, each verified on ollama.com/library as an existing
+// tag with the tools badge (or a tools-capable line):
+//   qwen2.5-coder:14b — 9.0 GB, 32K ctx, tools-capable coding model
+//   llama3.1:8b      — 4.9 GB, 128K ctx, tools-capable generalist
+//   mistral-nemo:12b — 7.1 GB, 128K ctx, tools badge on library page
+//   devstral:24b     — 14 GB, 128K ctx, tools badge; built for coding agents
 const AGENT_MODELS = [
   { name: 'hermes3:8b', label: 'Hermes 3 8B — recommended agent' },
   { name: 'hermes3:70b', label: 'Hermes 3 70B' },
   { name: 'hermes3:3b', label: 'Hermes 3 3B — smallest' },
   { name: 'gpt-oss:20b', label: 'GPT-OSS 20B — previous default' },
+  { name: 'qwen2.5-coder:14b', label: 'Qwen 2.5 Coder 14B — coding agent (9.0 GB)' },
+  { name: 'llama3.1:8b', label: 'Llama 3.1 8B — fast generalist (4.9 GB)' },
+  { name: 'mistral-nemo:12b', label: 'Mistral Nemo 12B — long context (7.1 GB)' },
+  { name: 'devstral:24b', label: 'Devstral 24B — coding agent (14 GB)' },
 ];
 
 const BLOCKED_PATTERNS = [
@@ -530,6 +544,14 @@ function registerIpc() {
     if (!next.instructions || !String(next.instructions).trim()) next.instructions = DEFAULT_INSTRUCTIONS;
     if (!next.startDir || !fs.existsSync(next.startDir)) next.startDir = os.homedir();
     next.termFont = Math.min(28, Math.max(9, Number(next.termFont) || 13));
+    // themes + fonts (customization round, 2026-11-09)
+    const THEMES = ['dark', 'light', 'warp-dark', 'dracula', 'nord', 'solarized-dark', 'one-dark'];
+    if (!THEMES.includes(next.theme)) next.theme = DEFAULT_SETTINGS.theme;
+    next.accent = /^#[0-9a-fA-F]{6}$/.test(String(next.accent || '')) ? next.accent : '';
+    const FONT_FAMS = ['system', 'jetbrains', 'fira', 'plex'];
+    if (!FONT_FAMS.includes(next.termFontFamily)) next.termFontFamily = 'system';
+    if (!FONT_FAMS.includes(next.chatFontFamily)) next.chatFontFamily = 'system';
+    next.chatFont = Math.min(20, Math.max(12, Number(next.chatFont) || 15));
     next.shell = String(next.shell || '').trim();
     next.autoOllama = next.autoOllama !== false && next.autoOllama !== 'false';
     settings = next;
