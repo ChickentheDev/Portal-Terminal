@@ -97,6 +97,21 @@
         <input id="s-host" spellcheck="false" autocomplete="off">
       </label>
 
+      <div class="models" id="s-models">
+        <div class="models-head">
+          <span>Models</span>
+          <button id="s-models-refresh" class="btn small" type="button">Refresh</button>
+        </div>
+        <div id="s-models-list"></div>
+        <div class="models-pull">
+          <select id="s-models-preset" aria-label="Preset model to pull"></select>
+          <input id="s-models-custom" placeholder="or a custom tag, e.g. hf.co/user/repo:Q4_K_M" spellcheck="false" autocomplete="off">
+          <button id="s-models-pull" class="btn small" type="button">Pull</button>
+        </div>
+        <div id="s-models-status" class="field-hint"></div>
+        <span class="field-hint">Hugging Face: hf.co/user/repo pulls a GGUF model — no quant defaults to Q4_K_M when present; add :Q4_K_M to pick one. Gated repos need credentials set up on this machine.</span>
+      </div>
+
       <div class="row3">
         <label>Context size
           <input id="s-ctx" type="number" min="1024" step="1024">
@@ -193,6 +208,7 @@
   <script src="node_modules/@xterm/xterm/lib/xterm.js"></script>
   <script src="node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
   <script src="markdown.js"></script>
+  <script src="models.js"></script>
   <script src="terminal.js"></script>
   <script src="renderer.js"></script>
 </body>

@@ -27,6 +27,8 @@ contextBridge.exposeInMainWorld('api', {
   status: () => inv('ollama:status'),
   agentModels: () => inv('models:agents'),
   pullModel: (name) => inv('ollama:pull', name),
+  listModels: () => inv('ollama:models'),
+  deleteModel: (name) => inv('ollama:delete', name),
   copy: (text) => inv('clipboard:write', text),
   paste: () => inv('clipboard:read'),
 

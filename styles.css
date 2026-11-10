@@ -361,6 +361,10 @@ code.inl {
   user-select: text;
 }
 .cmd-o.open { max-height: none; }
+.diff-add { color: var(--ok); }
+.diff-del { color: var(--err); }
+.diff-hunk { color: var(--fg3); }
+.file-note { padding: 0 14px 11px; font: 12.5px/1.55 var(--mono); color: var(--fg2); white-space: pre-wrap; overflow-wrap: anywhere; }
 .approve { display: flex; gap: 8px; padding: 0 12px 12px; }
 .running-line { padding: 0 12px 11px; font: 12px var(--mono); color: var(--fg3); }
 
@@ -471,6 +475,20 @@ details.think .tt { margin-top: 6px; padding-left: 12px; border-left: 1px solid 
 .row2 { display: grid; grid-template-columns: 1fr 2fr; gap: 12px; }
 .dir-pick { display: flex; gap: 8px; }
 .panel-actions { display: flex; align-items: center; gap: 8px; padding-top: 4px; }
+.btn:disabled { opacity: .45; cursor: default; }
+.models { display: grid; gap: 10px; padding-top: 12px; border-top: 1px solid var(--line); }
+.models-head { display: flex; align-items: center; justify-content: space-between; font-size: 13px; font-weight: 600; color: var(--fg2); }
+.model-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); }
+.model-info { display: grid; gap: 2px; min-width: 0; }
+.model-name { font: 13px var(--mono); color: var(--fg); overflow-wrap: anywhere; }
+.model-meta { font-size: 12px; color: var(--fg3); }
+.model-btns { display: flex; gap: 6px; flex: none; }
+.model-badge { display: inline-block; font: 600 10px/1 var(--sans); color: var(--neon-teal); border: 1px solid var(--neon-teal); border-radius: 4px; padding: 2px 4px; vertical-align: 1px; }
+.model-preset { font-size: 11px; color: var(--fg3); }
+.model-current { font-size: 11px; color: var(--ok); }
+.models-pull { display: flex; gap: 8px; }
+.models-pull select { flex: none; width: 210px; }
+.models-pull input { flex: 1; min-width: 0; }
 .panel label.check { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .panel label.check input[type="checkbox"] { width: auto; flex: none; accent-color: var(--neon-teal); }
 .panel label.check .field-hint { flex: 1 1 100%; }

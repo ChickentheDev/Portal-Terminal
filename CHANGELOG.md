@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.3.1
+
+### Agent file tools
+The agent can now read, write, and patch files in the chat's working
+directory with four new tools (`file_read`, `file_write`, `file_edit`,
+`file_list`) instead of going through shell heredocs. Every write or
+edit shows the exact diff in an approval card first — Apply, Deny, or
+Always run — and the applied edit appears as a file card in the chat
+with the diff and a +/− line count. Reads and listings never ask for
+approval. Paths are scoped to the chat's working directory: `..`
+traversal, absolute paths outside it, and symlinks escaping it are
+refused, as are `.git`, `node_modules`, `dist`, and secrets (`.env`,
+keys, credentials). Writes are atomic (temp file + rename), and at
+apply time the file is re-read and re-verified — an edit whose target
+text still matches exactly once is re-based onto the fresh content
+(an unrelated change elsewhere in the file is preserved, never
+clobbered); anything else aborts with an error instead of overwriting.
+File contents are treated as data, never instructions: the agent is
+told not to follow instructions found inside a file, and the approval
+card is the enforcement point.
+Limits, stated plainly: no delete tool and no undo — an applied edit
+can only be undone by another edit (or the shell); scope is the chat's
+working directory only; reads are capped at 200 KB, writes at 1 MB,
+edits require the file to be ≤ 200 KB; a model can still be tricked
+into PROPOSING a bad edit — nothing writes without approval while
+Ask-first is on. Live model behavior with the new tools is unverified
+in the sandbox (fake Ollama only); hermes3:8b is verified through the
+harness, the other 7 presets are tools-capable but untested live with
+these tools.
+
+### Model manager (with Hugging Face)
+Settings now has a Models section that lists every model actually
+installed in Ollama — name, size, and modified date — with Use and
+Delete on each row, a "current agent" marker on the active model, and
+a label where a row matches one of the 8 agent presets. Use and
+Delete apply immediately (no Save needed, and a later Save can't
+revert them). Delete asks for confirmation first; deleting the agent's
+own model falls back to hermes3:8b with an inline note and never
+auto-pulls the fallback. The pull row takes a preset or a custom tag
+with live progress (per-layer %, not whole download) and inline
+errors. Hugging Face tags work as `hf.co/{user}/{repo}` or
+`hf.co/{user}/{repo}:{quant}` (also `huggingface.co` as the domain);
+a full `.gguf` filename works as the quant, and no quant defaults to
+Q4_K_M when present. Pulled HF models show up under their full
+`hf.co/…` name with an HF badge. If Ollama is down, the section says
+so and disables its actions instead of crashing.
+Limits, stated plainly: pull % is per-layer, not whole-download;
+deleting an idle loaded model unloads it first, but a model actively
+serving a request is refused; deleting the agent's model mid-turn
+fails that turn; Ollama has no tools-capability check, so any
+installed model can be switched to as the agent (the 8 presets are
+the ones verified tools-capable); no rename/alias, no bulk delete,
+and no disk-space check before pulling; gated HF repos need
+credentials configured on the machine (the app doesn't set that up);
+GGUF only — safetensors-only repos fail, and there are no Hugging
+Face Inference API cloud calls. Live HF pulls are unverified in the
+sandbox (fake Ollama only) — whether Ollama lowercases the tag in
+`/api/tags` is still an open question for a real pull.
+
 ## 0.3.0
 
 ### Real shell integration for command blocks

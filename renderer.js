@@ -228,14 +228,86 @@
     let node = null;
     if (m.role === 'user') node = userMsg(m);
     else if (m.role === 'assistant') node = aiMsg(m);
-    else if (m.role === 'tool') node = cmdCard(m);
+    else if (m.role === 'tool') node = (m.meta && m.meta.kind === 'file') ? fileCard(m) : cmdCard(m);
     if (node && node.children.length) messagesEl.append(node);
+  }
+
+  // Diff as a <pre> with one span per line — file contents are never
+  // inserted as HTML, so a diff of a malicious file can't inject markup.
+  function diffPre(diff) {
+    const pre = el('pre', 'cmd-o diff');
+    for (const line of String(diff).split('\n')) {
+      const span = document.createElement('span');
+      span.textContent = line + '\n';
+      if (line.startsWith('+')) span.className = 'diff-add';
+      else if (line.startsWith('-')) span.className = 'diff-del';
+      else if (line.startsWith('@@')) span.className = 'diff-hunk';
+      pre.append(span);
+    }
+    return pre;
+  }
+
+  // Long bodies get the same Show all / Show less collapse as command output.
+  function addCollapse(pre, btns) {
+    if (pre.textContent.split('\n').length > 14) {
+      const more = el('button', 'link-btn', 'Show all');
+      more.onclick = () => {
+        const open = pre.classList.toggle('open');
+        more.textContent = open ? 'Show less' : 'Show all';
+      };
+      btns.prepend(more);
+    }
+  }
+
+  function fileCard(m) {
+    const meta = m.meta || {};
+    const op = meta.op || 'file';
+    const status = meta.status || 'ran';
+    const card = el('div', 'cmd file ' + status);
+    const head = el('div', 'cmd-h');
+    head.append(el('span', 'prompt', op));
+    const code = el('code', 'cmd-t');
+    code.textContent = meta.path || '';
+    head.append(code);
+    let tagText = status;
+    if (status === 'applied' && meta.additions != null) tagText = `+${meta.additions} −${meta.deletions}`;
+    const tag = el('span', 'tag');
+    tag.textContent = tagText;
+    head.append(tag);
+    const btns = el('div', 'cmd-b');
+    if (meta.diff) {
+      const cc = el('button', 'link-btn', 'Copy diff');
+      cc.onclick = () => copyText(meta.diff, cc);
+      btns.append(cc);
+    }
+    head.append(btns);
+    card.append(head);
+    if (meta.diff) {
+      const pre = diffPre(meta.diff);
+      card.append(pre);
+      addCollapse(pre, btns);
+    }
+    if (m.content) {
+      if (meta.diff && (status === 'error' || status === 'denied' || status === 'stopped')) {
+        // The diff shows what was proposed; the note says why it did not apply.
+        const note = el('div', 'file-note');
+        note.textContent = m.content;
+        card.append(note);
+      } else if (!meta.diff) {
+        // read / list results, or a short error / no-change note
+        const out = el('pre', 'cmd-o');
+        out.textContent = m.content;
+        card.append(out);
+        addCollapse(out, btns);
+      }
+    }
+    return card;
   }
 
   function renderEmpty() {
     const box = el('div', 'empty');
     box.append(el('h1', null, 'What should we do?'));
-    box.append(el('p', null, 'I can run commands on this computer. I ask before each one.'));
+    box.append(el('p', null, 'I can run commands and edit files in your working directory. I ask before each change.'));
     const wrap = el('div', 'suggest');
     for (const s of suggestions) {
       const b = el('button');
@@ -310,12 +382,57 @@
     return card;
   }
 
-  function showApproval(callId, command) {
+  // Approval card for a file write/edit: op + path + the exact diff.
+  // Buttons mirror the command card (Apply / Deny / Always run).
+  function fileApprovalCard(payload) {
+    const card = el('div', 'cmd waiting');
+    const head = el('div', 'cmd-h');
+    head.append(el('span', 'prompt', payload.op || 'file'));
+    const code = el('code', 'cmd-t');
+    code.textContent = payload.path || '';
+    head.append(code);
+    head.append(el('span', 'tag', 'waiting for you'));
+    card.append(head);
+    if (payload.diff) card.append(diffPre(payload.diff));
+
+    const row = el('div', 'approve');
+    const mk = (label, decision, cls) => {
+      const b = el('button', 'btn small ' + (cls || ''));
+      b.textContent = label;
+      b.onclick = () => {
+        window.api.decide(payload.callId, decision);
+        if (decision === 'y' || decision === 'a') showApplying(payload.op, payload.path);
+        else { clearTransient(); setWorking(true); }
+      };
+      return b;
+    };
+    row.append(mk('Apply', 'y', 'solid'), mk('Deny', 'n'), mk('Always run', 'a'));
+    card.append(row);
+    return card;
+  }
+
+  function showApproval(payload) {
     setWorking(false);
     clearStream();
     clearTransient();
-    S.transient = approvalCard(callId, command);
+    S.transient = payload.kind === 'file' ? fileApprovalCard(payload) : approvalCard(payload.callId, payload.command);
     messagesEl.append(S.transient);
+    scrollDown();
+  }
+
+  function showApplying(op, pathArg) {
+    setWorking(false);
+    clearStream();
+    clearTransient();
+    const card = el('div', 'cmd');
+    const head = el('div', 'cmd-h');
+    head.append(el('span', 'prompt', op || 'file'));
+    const code = el('code', 'cmd-t');
+    code.textContent = pathArg || '';
+    head.append(code, el('span', 'tag', 'applying'));
+    card.append(head, el('div', 'running-line', 'Applying…'));
+    S.transient = card;
+    messagesEl.append(card);
     scrollDown();
   }
 
@@ -338,7 +455,7 @@
   function applyLive(live) {
     if (!live || !live.running) return;
     S.running.add(S.cur.id);
-    if (live.approval) showApproval(live.approval.callId, live.approval.command);
+    if (live.approval) showApproval(live.approval);
     else if (live.exec) showRunning(live.exec);
     else setWorking(true);
   }
@@ -460,11 +577,15 @@
 
     on('approval', (p) => {
       if (!S.cur || p.chatId !== S.cur.id) return;
-      showApproval(p.callId, p.command);
+      showApproval(p);
     });
 
     on('running', (p) => {
       if (!S.cur || p.chatId !== S.cur.id) return;
+      if (p.kind === 'file') {
+        if (!S.transient || !S.transient.querySelector('.running-line')) showApplying(p.op, p.path);
+        return;
+      }
       if (!S.transient || !S.transient.querySelector('.running-line')) showRunning(p.command);
     });
 
@@ -543,10 +664,168 @@
     $('#s-shellint').checked = s.shellIntegration !== false;
     $('#s-autoollama').value = s.autoOllama === false ? 'no' : 'yes';
     refreshModelList();
+    refreshModels();
     $('#modal').hidden = false;
     $('#s-model').focus();
   }
   const closeSettings = () => ($('#modal').hidden = true);
+
+  /* ---------- model manager ---------- */
+
+  let modelsCache = null; // last ollama:models result, or null while unloaded
+
+  function modelRow(m) {
+    const u = window.PortalModels;
+    const row = document.createElement('div');
+    row.className = 'model-row';
+    const info = document.createElement('div');
+    info.className = 'model-info';
+    const name = document.createElement('span');
+    name.className = 'model-name';
+    name.textContent = m.name;
+    if (u.isHfTag(m.name)) {
+      const b = document.createElement('span');
+      b.className = 'model-badge';
+      b.textContent = 'HF';
+      b.title = 'Hugging Face model';
+      name.append(' ', b);
+    }
+    const preset = u.matchPreset(m.name, S.agents || []);
+    if (preset) {
+      const p = document.createElement('span');
+      p.className = 'model-preset';
+      p.textContent = preset.label;
+      name.append(' ', p);
+    }
+    if (u.isCurrentModel(m.name, S.settings.model)) {
+      const c = document.createElement('span');
+      c.className = 'model-current';
+      c.textContent = 'current agent';
+      name.append(' ', c);
+    }
+    const meta = document.createElement('span');
+    meta.className = 'model-meta';
+    meta.textContent = `${u.formatSize(m.size)} · ${u.formatDate(m.modified_at)}`;
+    info.append(name, meta);
+    const btns = document.createElement('div');
+    btns.className = 'model-btns';
+    const use = document.createElement('button');
+    use.className = 'btn small';
+    use.type = 'button';
+    use.textContent = 'Use';
+    use.disabled = u.isCurrentModel(m.name, S.settings.model);
+    use.onclick = () => useModel(m.name);
+    const del = document.createElement('button');
+    del.className = 'btn small';
+    del.type = 'button';
+    del.textContent = 'Delete';
+    del.onclick = () => deleteModel(m.name);
+    btns.append(use, del);
+    row.append(info, btns);
+    return row;
+  }
+
+  async function refreshModels() {
+    const list = $('#s-models-list');
+    const status = $('#s-models-status');
+    const pullBtn = $('#s-models-pull');
+    const preset = $('#s-models-preset');
+    // models.js loads as a plain <script> in index.html; if it ever fails
+    // to load, say so instead of hanging on "Loading models…".
+    if (!window.PortalModels) {
+      status.textContent = 'Model helpers failed to load — restart the app.';
+      pullBtn.disabled = true;
+      return;
+    }
+    // Populate the pull preset select once, from the agent presets.
+    if (!preset.options.length) {
+      for (const a of S.agents || []) {
+        const o = document.createElement('option');
+        o.value = a.name;
+        o.textContent = a.label;
+        preset.append(o);
+      }
+    }
+    list.innerHTML = '';
+    status.textContent = 'Loading models…';
+    let r;
+    try { r = await window.api.listModels(); } catch { r = { ok: false }; }
+    if (!r || !r.ok) {
+      modelsCache = null;
+      status.textContent = 'Ollama is offline — start it with ollama serve.';
+      pullBtn.disabled = true;
+      return;
+    }
+    modelsCache = r.models || [];
+    pullBtn.disabled = false;
+    if (!modelsCache.length) {
+      status.textContent = 'No models installed yet — pull one below.';
+      return;
+    }
+    status.textContent = '';
+    for (const m of modelsCache) list.append(modelRow(m));
+  }
+
+  async function useModel(name) {
+    S.settings = await window.api.setSettings({ model: name });
+    $('#s-model').value = S.settings.model;
+    await pollStatus();
+    refreshModelList();
+    await refreshModels();
+    $('#s-models-status').textContent = `Agent model is now ${S.settings.model}.`;
+  }
+
+  async function deleteModel(name) {
+    if (!confirm(`Delete ${name} from Ollama?\nThis frees its disk space and can't be undone.`)) return;
+    const r = await window.api.deleteModel(name);
+    if (!r || !r.ok) {
+      $('#s-models-status').textContent = `Could not delete ${name}: ${(r && r.error) || 'unknown error'}`;
+      return;
+    }
+    let note = `Deleted ${name}.`;
+    if (window.PortalModels.isCurrentModel(name, S.settings.model)) {
+      S.settings = await window.api.setSettings({ model: 'hermes3:8b' });
+      $('#s-model').value = S.settings.model;
+      note += ' Agent model fell back to hermes3:8b.';
+    }
+    await pollStatus();
+    refreshModelList();
+    await refreshModels();
+    $('#s-models-status').textContent = note;
+  }
+
+  async function pullManagerModel() {
+    const btn = $('#s-models-pull');
+    const status = $('#s-models-status');
+    if (btn.disabled) return;
+    const custom = $('#s-models-custom').value.trim();
+    const v = window.PortalModels.validatePullTag(custom || $('#s-models-preset').value);
+    if (!v.ok) { status.textContent = v.error; return; }
+    const name = v.tag;
+    btn.disabled = true;
+    btn.textContent = 'Pulling…';
+    const off = window.api.on('ollama:pull-progress', (p) => {
+      if (p.model !== name) return;
+      const pct = p.total > 0 ? `${Math.round((p.completed / p.total) * 100)}%` : p.status;
+      btn.textContent = `Pulling… ${pct}`;
+      status.textContent = `Pulling ${name}… ${pct} (progress is per layer)`;
+    });
+    const r = await window.api.pullModel(name);
+    off();
+    btn.disabled = false;
+    btn.textContent = 'Pull';
+    if (r.ok) {
+      $('#s-models-custom').value = '';
+      await pollStatus();
+      refreshModelList();
+      await refreshModels();
+      status.textContent = `Pulled ${name}.`;
+    } else {
+      let err = `Could not pull ${name}: ${r.error || 'unknown error'}`;
+      if (window.PortalModels.isHfTag(name)) err += ' If this is a Hugging Face model, try adding :Q4_K_M.';
+      status.textContent = err;
+    }
+  }
 
   async function pullModel() {
     const btn = $('#s-model-pull');
@@ -701,6 +980,8 @@
     $('#open-palette').onclick = () => openPalette();
     $('#s-cancel').onclick = closeSettings;
     $('#s-save').onclick = saveSettings;
+    $('#s-models-refresh').onclick = refreshModels;
+    $('#s-models-pull').onclick = pullManagerModel;
     $('#s-model-pull').onclick = pullModel;
     $('#s-reset').onclick = async () => { $('#s-instr').value = await window.api.defaultInstructions(); };
     $('#s-accent').addEventListener('input', () => { accentCustom = true; });
