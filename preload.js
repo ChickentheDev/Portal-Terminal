@@ -1,7 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 const inv = (channel, ...args) => ipcRenderer.invoke(channel, ...args);
-const EVENTS = ['stream', 'message', 'approval', 'running', 'done', 'error', 'chat-updated', 'auto', 'term-data', 'term-exit', 'ollama:pull-progress'];
+const EVENTS = ['stream', 'message', 'approval', 'running', 'done', 'error', 'chat-updated', 'auto', 'term-data', 'term-exit', 'term-osc', 'ollama:pull-progress'];
 
 contextBridge.exposeInMainWorld('api', {
   getSettings: () => inv('settings:get'),

@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.3.0
+
+### Real shell integration for command blocks
+Command blocks now show the real exit code of each command (0 in green,
+non-zero in red with the code, Ctrl+C as Cancelled) and the true
+per-command duration, instead of "running until the next command" and
+wall time between submits. The shells emit OSC 133 markers (A prompt,
+B command, C output, E command line, D finished with exit code) and
+the app parses them from the raw pty stream; the command text is read
+off the terminal buffer between the prompt and the Enter echo, falling
+back to the shell's own command line. Covered shells: bash, zsh, and
+fish — the integration is injected without touching your dotfiles
+(bash `--rcfile`, a temp ZDOTDIR that symlinks your real zsh files,
+fish `--init-command`). There is a "Shell integration" checkbox in
+Settings (on by default, applies to new terminal tabs).
+Limits, stated plainly: only bash, zsh, and fish are covered — `sh`,
+`ssh`, `tmux`/`screen`, and `sudo -i` sessions emit no markers, so
+the outer command's block stays running and inner commands get no
+blocks (the keystroke tracker is the fallback there, exactly as
+before, and it still shows no exit code). If you `exec` into a
+non-integrated shell, blocks stop until you open a new tab. Command
+output that literally contains OSC 133 bytes can fake a marker — the
+only effect is a wrong block status, never a crash. A block's command
+text comes from the shell's command line for zsh (exact) and from the
+buffer for bash/fish; for bash, a compound command shows its first
+simple command until the buffer read refines it to the full line.
+
+### Fixed
+- The first command in a new tab no longer files two blocks (the
+  keystroke tracker fired at Enter before the first marker arrived,
+  then the marker filed a second one). Any marker now marks the tab
+  integrated, and a marker block supersedes a just-filed tracker
+  block for the same command.
+- Fish on a minimal install (no `fish_prompt` function, so the prompt
+  is a builtin) no longer shows a blank prompt: the integration falls
+  back to a prompt mimicking the builtin default (`user@host cwd > `).
+
 ## 0.2.2
 
 ### Nano autocomplete

@@ -4,6 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
+const { createOsc133Parser } = require('./osc133.js');
 
 // Linux (including SteamOS) often can't use Chromium's SUID sandbox for a
 // user-installed Electron. This app only loads its own local files.
@@ -71,6 +72,7 @@ const DEFAULT_SETTINGS = {
   shell: '',
   autoOllama: true,
   nanoComplete: true, // VS Code-style autocomplete inside nano
+  shellIntegration: true, // OSC 133 markers: real exit codes + durations in command blocks
 };
 
 // Agent models: the terminal agent runs on one of these via Ollama.
@@ -556,6 +558,7 @@ function registerIpc() {
     next.shell = String(next.shell || '').trim();
     next.autoOllama = next.autoOllama !== false && next.autoOllama !== 'false';
     next.nanoComplete = next.nanoComplete !== false && next.nanoComplete !== 'false';
+    next.shellIntegration = next.shellIntegration !== false && next.shellIntegration !== 'false';
     settings = next;
     saveSettings();
     return settings;
@@ -709,6 +712,17 @@ function registerIpc() {
     }
     env.TERM = 'xterm-256color';
     env.COLORTERM = 'truecolor';
+    // Shell integration (OSC 133): the bridge injects the marker scripts
+    // for bash/zsh/fish; the renderer turns them into real blocks. When
+    // the toggle is off (or the scripts are missing) the bridge launches
+    // the shell plainly and the keystroke tracker is the fallback.
+    if (settings.shellIntegration !== false) {
+      const idir = resourcePath('shell-integration');
+      if (fs.existsSync(idir)) {
+        env.PORTAL_SHELL_INTEGRATION = '1';
+        env.PORTAL_INTEGRATION_DIR = idir;
+      }
+    }
     let child;
     try {
       child = spawn(
@@ -721,7 +735,12 @@ function registerIpc() {
     }
     const id = String(++termSeq);
     terms.set(id, child);
-    child.stdout.on('data', (d) => send('term-data', { id, data: d }));
+    // OSC 133 parser: reads the RAW pty stream (xterm.js consumes OSC
+    // sequences, so they never reach the terminal buffer). term-osc is
+    // sent after term-data for the same chunk, so the renderer sees the
+    // output first.
+    const osc = createOsc133Parser((ev) => send('term-osc', { id, ...ev }));
+    child.stdout.on('data', (d) => { send('term-data', { id, data: d }); osc.feed(d); });
     child.stderr.on('data', (d) => send('term-data', { id, data: d }));
     child.stdin.on('error', () => {});
     child.stdio[3].on('error', () => {});

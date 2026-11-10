@@ -3,6 +3,8 @@
   --sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
   --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
   --neon-teal: #48e0c2;
+  --ok: #7ed491;
+  --err: #ff6b6b;
 }
 
 body[data-theme="dark"] {
@@ -28,6 +30,8 @@ body[data-theme="light"] {
   --fg3: #8c8c8c;
   --inv-bg: #0a0a0a;
   --inv-fg: #fff;
+  --ok: #1a7f37;
+  --err: #cf222e;
 }
 /* Warp Dark — warm amber accent, like Warp's dark theme */
 body[data-theme="warp-dark"] {
@@ -631,6 +635,9 @@ body[data-view="term"] #term-resize { display: none; }
 .term-block { display: flex; align-items: center; gap: 10px; margin: 6px 8px 0; padding: 7px 10px; background: var(--bg2); border: 1px solid var(--line); border-radius: 8px; }
 .term-block:last-child { margin-bottom: 6px; }
 .term-block.running { border-left: 3px solid var(--neon-teal); }
+.term-block.failed { border-left: 3px solid var(--err); }
+.term-block .tb-status.tb-ok { color: var(--ok); }
+.term-block .tb-status.tb-err { color: var(--err); }
 .term-block .tb-cmd { font-family: var(--mono); font-size: 12.5px; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
 .term-block .tb-cmd::before { content: "❯ "; color: var(--fg3); }
 .term-block .tb-status { flex: none; font-size: 12px; color: var(--fg3); }

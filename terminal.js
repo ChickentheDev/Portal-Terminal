@@ -160,7 +160,7 @@
     const fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
 
-    const tab = { n, pane, term, fit, id: null, title: 'Terminal ' + n, dead: false, blocks: [], current: null, inputBuf: '', inputStale: false, nanoFile: null, nano: { open: false, items: [], active: 0, prefix: '', force: false, justAccepted: false, pasteHide: false, timer: 0 } };
+    const tab = { n, pane, term, fit, id: null, title: 'Terminal ' + n, dead: false, blocks: [], current: null, inputBuf: '', inputStale: false, nanoFile: null, nano: { open: false, items: [], active: 0, prefix: '', force: false, justAccepted: false, pasteHide: false, timer: 0 }, shellIntegrated: false, markerAnchor: null, markerAnchorTimer: 0, markerStack: [], pendingCmd: '' };
     T.tabs.push(tab);
     T.active = tab;
     for (const t of T.tabs) t.pane.hidden = t !== tab;
@@ -313,10 +313,14 @@
    * xterm renders to canvas, so blocks live in a DOM rail above the
    * terminal instead of inline. Each submitted command becomes a block
    * with a header row: command, copy + rerun, status/duration.
-   * Limits, stated plainly: there is no shell integration, so a block
-   * is "running" until the next command is submitted (or Ctrl+C), and
-   * its duration is wall time between submits — the exit code is not
-   * observable and is never faked. */
+   * With shell integration (OSC 133 markers from bash/zsh/fish), a block
+   * is created at C (output start) and finished at D with the REAL exit
+   * code and true duration; Ctrl+C is reported by the shell as 130.
+   * Without markers (integration off, sh, ssh, tmux) the keystroke
+   * tracker below is the fallback: a block is "running" until the next
+   * command is submitted, duration is wall time between submits, and no
+   * exit code is shown. Marker blocks use a stack (not a single current)
+   * so nested integrated shells report correctly. */
 
   // Track the line being typed so the block records the real command.
   function trackInput(tab, d) {
@@ -339,7 +343,9 @@
       else if (ch === '\x7f') tab.inputBuf = tab.inputBuf.slice(0, -1);
       else if (ch === '\x15') tab.inputBuf = ''; // Ctrl+U clears the line
       else if (ch === '\x03') { // Ctrl+C cancels the running command
-        if (tab.current) finishBlock(tab, 'cancelled');
+        // Marker mode: the shell reports it as D;130 — finishing here
+        // would mark the block cancelled before the real exit code lands.
+        if (!tab.shellIntegrated && tab.current) finishBlock(tab, 'cancelled');
         tab.inputBuf = '';
       } else if (ch === '\x1b' || ch === '\t') tab.inputStale = true; // arrows, completion: line changed behind our back
       else if (ch >= ' ' && ch !== '\x7f') tab.inputBuf += ch;
@@ -347,13 +353,18 @@
   }
 
   function submitLine(tab) {
+    // Marker mode: the shell owns the blocks (C creates, D finishes).
+    // Stay silent so Enter never files a second block — and so Enter
+    // inside nano (no markers there) files none either. inputBuf is
+    // cleared so it can't grow unboundedly while the tracker is off.
+    if (tab.shellIntegrated) { tab.inputBuf = ''; tab.inputStale = false; return; }
     let cmd = tab.inputBuf.trim();
     if (!cmd || tab.inputStale) cmd = commandFromBuffer(tab) || cmd; // fall back to the line on screen
     tab.inputBuf = '';
     tab.inputStale = false;
     if (!cmd) return;
     if (tab.current) finishBlock(tab, 'done'); // the previous command ended when the prompt returned
-    tab.current = { command: cmd, startedAt: Date.now(), status: 'running' };
+    tab.current = { command: cmd, startedAt: Date.now(), status: 'running', source: 'tracker' };
     tab.blocks.push(tab.current);
     if (tab.blocks.length > 30) tab.blocks.splice(0, tab.blocks.length - 30);
     if (!T.blocksHidden) $('#term-blocks').hidden = false;
@@ -379,10 +390,129 @@
     } catch { return ''; }
   }
 
-  function finishBlock(tab, status) {
+  // Read the command off the buffer between the B anchor (end of the
+  // prompt) and the line above the cursor (the Enter echo moved the
+  // cursor past the command). A wrapped line joins without a newline;
+  // any other line break is a real newline. Continuation prompts
+  // ('> ') are stripped. Returns '' when there is no usable anchor.
+  function commandFromAnchor(tab) {
+    try {
+      const a = tab.markerAnchor;
+      if (!a) return '';
+      const b = tab.term.buffer.active;
+      const endY = b.cursorY - 1;
+      if (endY < a.y) return '';
+      let out = '';
+      for (let y = a.y; y <= endY; y++) {
+        const line = b.getLine(y);
+        if (!line) continue;
+        let s = line.translateToString(true);
+        if (y === a.y) s = s.slice(a.x);
+        else s = s.replace(/^\s*>\s?/, '');
+        if (y > a.y && !s.trim()) continue;
+        if (y > a.y && !line.isWrapped) out += '\n';
+        out += s;
+      }
+      return out.trim();
+    } catch { return ''; }
+  }
+
+  // ---------- OSC 133 shell integration ----------
+  // Markers arrive from the main process (parsed from the raw pty stream;
+  // xterm.js consumes OSC sequences, so they never reach the buffer).
+  // A = prompt started (clear pending command + anchor), B = command
+  // started (record the cursor as the anchor, after queued writes flush),
+  // E = the command line as the shell knows it, C = output started (push
+  // a block), D = command finished (pop it, set the real exit code and
+  // duration). The block is created synchronously at C so a fast D finds
+  // it on the stack; only the command text is refined later from the
+  // anchor, once the Enter echo has landed in the buffer.
+  function onOsc(tab, ev) {
+    if (!tab || tab.dead || !ev || !ev.kind) return;
+    // Any marker proves the shell is integrated — the startup A/B arrive
+    // at the first prompt, before the first command is typed, so the
+    // keystroke tracker is suppressed from the very first Enter.
+    tab.shellIntegrated = true;
+    if (ev.kind === 'A') {
+      tab.pendingCmd = '';
+      tab.markerAnchor = null;
+      return;
+    }
+    if (ev.kind === 'B') {
+      // term.write is async: capture the cursor after the queued prompt
+      // writes have flushed, so the anchor is the end of the prompt.
+      try {
+        tab.term.write('', () => {
+          try {
+            const b = tab.term.buffer.active;
+            tab.markerAnchor = { x: b.cursorX, y: b.cursorY };
+          } catch {}
+        });
+        clearTimeout(tab.markerAnchorTimer);
+        tab.markerAnchorTimer = setTimeout(() => { tab.markerAnchor = null; }, 200);
+      } catch { tab.markerAnchor = null; }
+      return;
+    }
+    if (ev.kind === 'E') {
+      tab.pendingCmd = ev.command || '';
+      return;
+    }
+    if (ev.kind === 'C') {
+      // Belt-and-braces for the type-ahead race (Enter pressed before the
+      // startup markers arrived): the tracker may have filed a block for
+      // this very command. It is the last block, still running, and the
+      // marker block supersedes it — drop it so the command is not doubled.
+      const last = tab.blocks[tab.blocks.length - 1];
+      if (last && last.source !== 'marker' && last.status === 'running') {
+        tab.blocks.pop();
+        if (tab.current === last) tab.current = null;
+      }
+      // E is exact for zsh/fish and the first simple command for bash;
+      // the anchor refines it to the full line below.
+      const block = { command: tab.pendingCmd || '(command)', startedAt: Date.now(), status: 'running', source: 'marker' };
+      tab.blocks.push(block);
+      if (tab.blocks.length > 30) tab.blocks.splice(0, tab.blocks.length - 30);
+      tab.markerStack.push(block);
+      tab.current = block;
+      tab.pendingCmd = '';
+      if (!T.blocksHidden) $('#term-blocks').hidden = false;
+      if (tab === T.active) renderBlocks();
+      updateBlocksToggle();
+      nanoOnCommand(tab);
+      let refined = false;
+      const refine = () => {
+        if (refined) return; refined = true;
+        if (!tab.markerStack.includes(block)) return; // already finished
+        const text = commandFromAnchor(tab);
+        if (text && text !== block.command) {
+          block.command = text;
+          if (tab === T.active) renderBlocks();
+        }
+        tab.markerAnchor = null;
+      };
+      try { tab.term.write('', refine); } catch { refine(); }
+      setTimeout(() => { if (!refined) refine(); }, 200);
+      return;
+    }
+    if (ev.kind === 'D') {
+      const block = tab.markerStack.pop();
+      if (!block) return; // startup D, or Ctrl+C at an empty prompt
+      const code = ev.code;
+      block.status = code === 130 ? 'cancelled' : 'done';
+      if (code != null) block.exitCode = code;
+      block.durationMs = Date.now() - block.startedAt;
+      // A nested shell finishing returns to the outer command's block.
+      tab.current = tab.markerStack.length ? tab.markerStack[tab.markerStack.length - 1] : null;
+      if (tab === T.active) renderBlocks();
+      return;
+    }
+  }
+
+  function finishBlock(tab, status, code) {
     const b = tab.current;
     if (!b) return;
     b.status = status;
+    if (code != null) b.exitCode = code;
     b.durationMs = Date.now() - b.startedAt;
     tab.current = null;
     if (tab === T.active) renderBlocks();
@@ -405,12 +535,17 @@
       return;
     }
     for (const b of tab.blocks) {
-      const row = el('div', 'term-block' + (b.status === 'running' ? ' running' : ''));
+      const row = el('div', 'term-block' + (b.status === 'running' ? ' running' : '') + (b.status === 'done' && b.exitCode ? ' failed' : ''));
       const cmd = el('span', 'tb-cmd');
       cmd.textContent = b.command;
       cmd.title = b.command;
       const status = el('span', 'tb-status');
-      status.textContent = b.status === 'running' ? 'Running…' : b.status === 'cancelled' ? 'Cancelled' : fmtDuration(b.durationMs);
+      if (b.status === 'running') status.textContent = 'Running…';
+      else if (b.status === 'cancelled') status.textContent = 'Cancelled' + (b.durationMs != null ? ' · ' + fmtDuration(b.durationMs) : '');
+      else if (b.exitCode != null) {
+        status.textContent = 'exit ' + b.exitCode + ' · ' + fmtDuration(b.durationMs);
+        status.className = 'tb-status' + (b.exitCode === 0 ? ' tb-ok' : ' tb-err');
+      } else status.textContent = fmtDuration(b.durationMs);
       const copy = el('button', 'tb-btn');
       copy.textContent = 'Copy';
       copy.title = 'Copy command';
@@ -772,6 +907,13 @@
         T.early.get(id).push(data);
       }
     });
+    // OSC 133 markers (startup D/A can arrive before the tab has its id;
+    // they are no-ops — an empty stack and a cleared pending command —
+    // so unknown ids are simply ignored, unlike term-data).
+    window.api.on('term-osc', (ev) => {
+      const tab = ev && T.tabs.find((t) => t.id === ev.id);
+      if (tab) onOsc(tab, ev);
+    });
     window.api.on('term-exit', ({ id, code }) => {
       const tab = T.tabs.find((t) => t.id === id);
       if (!tab) return;
@@ -796,6 +938,7 @@
   }
 
   // _nano is a test hook (headless harness + launch test drive the popup
-  // through it); it is not part of the app's UI surface.
-  window.TermUI = { init, setView, toggle, newTab, sendText, updateTheme, setFont, setFontFamily, askAi, focus, setNanoComplete, _nano: { parseNanoCommand, rankSuggestions, wordBeforeCursor, nanoActive, extOf, getActiveTab: () => T.active, refresh: nanoRefresh, accept: nanoAccept, hide: nanoHide, schedule: nanoSchedule } };
+  // through it); it is not part of the app's UI surface. _blocks is the
+  // same for the shell-integration marker path.
+  window.TermUI = { init, setView, toggle, newTab, sendText, updateTheme, setFont, setFontFamily, askAi, focus, setNanoComplete, _nano: { parseNanoCommand, rankSuggestions, wordBeforeCursor, nanoActive, extOf, getActiveTab: () => T.active, refresh: nanoRefresh, accept: nanoAccept, hide: nanoHide, schedule: nanoSchedule }, _blocks: { onOsc, commandFromAnchor, getActiveTab: () => T.active } };
 })();

@@ -540,6 +540,7 @@
     $('#s-termfont').value = s.termFont;
     $('#s-shell').value = s.shell || '';
     $('#s-nano').checked = s.nanoComplete !== false;
+    $('#s-shellint').checked = s.shellIntegration !== false;
     $('#s-autoollama').value = s.autoOllama === false ? 'no' : 'yes';
     refreshModelList();
     $('#modal').hidden = false;
@@ -589,6 +590,7 @@
       termFont: $('#s-termfont').value,
       shell: $('#s-shell').value,
       nanoComplete: $('#s-nano').checked,
+      shellIntegration: $('#s-shellint').checked,
       autoOllama: $('#s-autoollama').value === 'yes',
     });
     applyTheme();
