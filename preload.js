@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld('api', {
   copy: (text) => inv('clipboard:write', text),
   paste: () => inv('clipboard:read'),
 
+  readFileText: (p) => inv('file:readText', p),
   termCreate: (opts) => inv('term:create', opts),
   termWrite: (id, data) => ipcRenderer.send('term:write', id, data),
   termResize: (id, cols, rows) => ipcRenderer.send('term:resize', id, cols, rows),

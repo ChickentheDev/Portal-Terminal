@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.2.2
+
+### Nano autocomplete
+While editing a file inside nano in the built-in terminal, a VS Code-style
+suggestion popup appears at the cursor as you type a word (2+ characters):
+Tab or Enter accepts the selected suggestion, Up/Down move, Esc closes it,
+Ctrl+Space forces it open. Suggestions come from the open file, the visible
+screen (so unsaved edits count), and small keyword lists per file type.
+There is a "Nano autocomplete" checkbox in Settings (on by default).
+Limits, stated plainly: no LSP and no whole-project symbols — only the
+open file, the visible screen, and keywords. Relative file paths resolve
+against the chat's working directory, so if you `cd`'d elsewhere in the
+shell the file read may miss and screen words carry the suggestions.
+
+### Fixed
+- Pressing Enter inside a fullscreen app (nano, vim, less) no longer
+  files a bogus command block for the line on screen. The input tracker
+  now ignores keystrokes while the terminal is on the alternate screen;
+  that also keeps the nano command recorded, so detection stays correct.
+- Esc while the autocomplete popup is open now actually dismisses it:
+  passing Esc through to nano made nano redraw the cursor (reopening
+  the popup) and armed its Meta prefix, so the next key ran a Meta
+  command. Esc is swallowed only while the popup is open; with the
+  popup closed it reaches nano as usual and Meta shortcuts work.
+- Accepting a suggestion now re-checks the word on screen first, so a
+  fast keystroke typed between the popup rendering and Tab can't
+  produce a garbled word (e.g. `con` + `f` + Tab no longer yields
+  `conffig`).
+
 ## 0.2.1
 
 ### New models

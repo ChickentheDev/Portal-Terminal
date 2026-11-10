@@ -467,6 +467,9 @@ details.think .tt { margin-top: 6px; padding-left: 12px; border-left: 1px solid 
 .row2 { display: grid; grid-template-columns: 1fr 2fr; gap: 12px; }
 .dir-pick { display: flex; gap: 8px; }
 .panel-actions { display: flex; align-items: center; gap: 8px; padding-top: 4px; }
+.panel label.check { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.panel label.check input[type="checkbox"] { width: auto; flex: none; accent-color: var(--neon-teal); }
+.panel label.check .field-hint { flex: 1 1 100%; }
 
 /* ---------- command palette (Ctrl+K) ---------- */
 #palette {
@@ -644,6 +647,47 @@ body[data-view="term"] #term-resize { display: none; }
 .term-block .tb-btn:active { transform: scale(.96); }
 .term-blocks-empty { padding: 10px 14px; color: var(--fg3); font-size: 12.5px; }
 .term-pane { position: absolute; inset: 0; padding: 8px 4px 4px 12px; background: var(--bg); }
+
+/* ---------- nano autocomplete popup (VS Code-style) ---------- */
+.nano-complete {
+  position: absolute;
+  z-index: 5;
+  min-width: 200px;
+  max-width: 300px;
+  max-height: 240px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--bg2);
+  border: 1px solid var(--line2);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .45);
+  padding: 4px;
+}
+.nano-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  padding: 6px 8px;
+  color: var(--fg);
+  font: 13px var(--mono);
+  transition-property: transform, background-color, color;
+  transition-duration: 150ms;
+  transition-timing-function: ease-out;
+  -webkit-tap-highlight-color: transparent;
+}
+.nano-item .nano-kind { margin-left: auto; flex: none; color: var(--fg3); font-size: 11px; }
+.nano-item.active { background: var(--bg3); color: var(--fg); }
+@media (hover: hover) {
+  .nano-item:hover { background: var(--bg3); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .nano-item:active { transform: scale(.96); }
+}
 .term-pane .xterm { height: 100%; }
 .term-pane .xterm-viewport::-webkit-scrollbar { width: 10px; }
 

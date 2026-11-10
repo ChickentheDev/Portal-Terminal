@@ -539,6 +539,7 @@
     $('#s-instr').value = s.instructions;
     $('#s-termfont').value = s.termFont;
     $('#s-shell').value = s.shell || '';
+    $('#s-nano').checked = s.nanoComplete !== false;
     $('#s-autoollama').value = s.autoOllama === false ? 'no' : 'yes';
     refreshModelList();
     $('#modal').hidden = false;
@@ -587,9 +588,11 @@
       instructions: $('#s-instr').value,
       termFont: $('#s-termfont').value,
       shell: $('#s-shell').value,
+      nanoComplete: $('#s-nano').checked,
       autoOllama: $('#s-autoollama').value === 'yes',
     });
     applyTheme();
+    window.TermUI.setNanoComplete(S.settings.nanoComplete);
     closeSettings();
     pollStatus();
   }
@@ -794,6 +797,7 @@
     window.TermUI.init({
       fontSize: S.settings.termFont,
       fontFamily: monoStack(S.settings.termFontFamily),
+      nanoComplete: S.settings.nanoComplete,
       getCwd: () => (S.cur && S.cur.cwd) || S.settings.startDir,
       onAsk: (text) => {
         const block = '```\n' + text + '\n```\n';

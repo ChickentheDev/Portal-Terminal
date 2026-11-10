@@ -70,6 +70,7 @@ const DEFAULT_SETTINGS = {
   termFont: 13,
   shell: '',
   autoOllama: true,
+  nanoComplete: true, // VS Code-style autocomplete inside nano
 };
 
 // Agent models: the terminal agent runs on one of these via Ollama.
@@ -554,6 +555,7 @@ function registerIpc() {
     next.chatFont = Math.min(20, Math.max(12, Number(next.chatFont) || 15));
     next.shell = String(next.shell || '').trim();
     next.autoOllama = next.autoOllama !== false && next.autoOllama !== 'false';
+    next.nanoComplete = next.nanoComplete !== false && next.nanoComplete !== 'false';
     settings = next;
     saveSettings();
     return settings;
@@ -740,6 +742,19 @@ function registerIpc() {
     if (ctl && ctl.writable) ctl.write(`R ${cols | 0} ${rows | 0}\n`);
   });
   ipcMain.handle('term:kill', (_e, id) => { killTerm(String(id)); return true; });
+
+  // Narrow file read for nano autocomplete: the renderer only ever calls
+  // this with the file nano was opened with. Directories and files over
+  // 200 KB are refused; any error returns ok:false (screen words carry it).
+  ipcMain.handle('file:readText', (_e, filePath) => {
+    try {
+      const p = String(filePath || '');
+      if (!p) return { ok: false };
+      const st = fs.statSync(p);
+      if (!st.isFile() || st.size > 200 * 1024) return { ok: false };
+      return { ok: true, text: fs.readFileSync(p, 'utf8') };
+    } catch { return { ok: false }; }
+  });
 
   ipcMain.handle('clipboard:read', () => clipboard.readText());
   ipcMain.handle('clipboard:write', (_e, text) => { clipboard.writeText(String(text)); return true; });

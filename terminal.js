@@ -86,6 +86,7 @@
   }
 
   function setView(v, opts) {
+    nanoHide();
     applyView(v);
     const wantFocus = !opts || opts.focus !== false;
     if (v === 'chat') {
@@ -122,6 +123,7 @@
   }
 
   function select(tab) {
+    nanoHide();
     T.active = tab;
     for (const t of T.tabs) t.pane.hidden = t !== tab;
     renderTabs();
@@ -158,7 +160,7 @@
     const fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
 
-    const tab = { n, pane, term, fit, id: null, title: 'Terminal ' + n, dead: false, blocks: [], current: null, inputBuf: '', inputStale: false };
+    const tab = { n, pane, term, fit, id: null, title: 'Terminal ' + n, dead: false, blocks: [], current: null, inputBuf: '', inputStale: false, nanoFile: null, nano: { open: false, items: [], active: 0, prefix: '', force: false, justAccepted: false, pasteHide: false, timer: 0 } };
     T.tabs.push(tab);
     T.active = tab;
     for (const t of T.tabs) t.pane.hidden = t !== tab;
@@ -196,7 +198,9 @@
     tab.id = res.id;
     term.onData((d) => window.api.termWrite(tab.id, d));
     term.onData((d) => trackInput(tab, d));
-    term.onResize(({ cols, rows }) => window.api.termResize(tab.id, cols, rows));
+    term.onResize(({ cols, rows }) => { window.api.termResize(tab.id, cols, rows); nanoHide(tab); });
+    try { term.onScroll(() => nanoHide(tab)); } catch {}
+    try { term.onBlur(() => nanoHide(tab)); } catch {}
     const early = T.early.get(tab.id);
     if (early) { early.forEach((d) => term.write(d)); T.early.delete(tab.id); }
     // make sure the shell knows the final size
@@ -206,6 +210,7 @@
   }
 
   function closeTab(tab) {
+    nanoHide(tab);
     tab.dead = true;
     if (tab.id) window.api.termKill(tab.id);
     try { tab.term.dispose(); } catch {}
@@ -241,6 +246,26 @@
     const mod = e.ctrlKey || e.metaKey;
     const k = (e.key || '').toLowerCase();
     const stop = () => { e.preventDefault(); return false; };
+    // Nano autocomplete owns Tab/Enter/arrows/Esc while its popup is open.
+    // Esc is SWALLOWED while the popup is open (unlike the first draft,
+    // which passed it through): a lone Escape reaching nano makes nano
+    // redraw the cursor (which re-triggers the popup) AND arms nano's
+    // Meta prefix, so the next key would run a Meta command instead of
+    // typing. When the popup is closed, Esc passes through untouched and
+    // Meta shortcuts keep working.
+    if (tab.nano && tab.nano.open) {
+      if (k === 'tab' || k === 'enter') { nanoAccept(tab, tab.nano.active); return stop(); }
+      if (k === 'arrowdown') { tab.nano.active = Math.min(tab.nano.items.length - 1, tab.nano.active + 1); nanoRender(tab); return stop(); }
+      if (k === 'arrowup') { tab.nano.active = Math.max(0, tab.nano.active - 1); nanoRender(tab); return stop(); }
+      if (k === 'escape') { nanoHide(tab); return stop(); }
+    }
+    // Ctrl+Space forces the popup open while nano is active (also below
+    // the 2-char threshold). Anywhere else it passes through untouched —
+    // in the shell it is readline's set-mark.
+    if (mod && k === ' ' && T.opts.nanoComplete !== false && nanoActive(tab)) {
+      nanoRefresh(tab, true);
+      return stop();
+    }
     if (mod && k === '`') { toggle(); return stop(); }
     if (mod && e.shiftKey && k === 't') { newTab(); return stop(); }
     if (mod && e.shiftKey && k === 'w') { closeTab(tab); return stop(); }
@@ -296,6 +321,18 @@
   // Track the line being typed so the block records the real command.
   function trackInput(tab, d) {
     if (!d) return;
+    // A multi-char chunk is a paste (or an escape sequence): hide the
+    // popup so a pasted word never leaves a stale one behind. The next
+    // keystroke re-triggers it from the fresh buffer.
+    if (d.length > 1 && tab.nano) { tab.nano.pasteHide = true; nanoHide(tab); }
+    // Inside a fullscreen app (nano, vim, less...) the terminal uses the
+    // alternate screen: Enter is not a command submission and typed text
+    // is not a shell line. Ignore input there entirely — otherwise every
+    // Enter inside nano would file a bogus block for the line on screen
+    // and overwrite tab.current, breaking nano detection.
+    try {
+      if (tab.term.buffer.active === tab.term.buffer.alternate) return;
+    } catch {}
     for (let i = 0; i < d.length; i++) {
       const ch = d[i];
       if (ch === '\r' || ch === '\n') submitLine(tab);
@@ -322,6 +359,7 @@
     if (!T.blocksHidden) $('#term-blocks').hidden = false;
     if (tab === T.active) renderBlocks();
     updateBlocksToggle();
+    nanoOnCommand(tab);
   }
 
   // Read the command off the cursor line, stripping the prompt.
@@ -392,6 +430,276 @@
     $('#term-blocks-toggle').textContent = n ? `Blocks (${n})` : 'Blocks';
   }
 
+  /* ---------- nano autocomplete: detection + word source ----------
+   * VS Code-style completions while editing inside nano. Suggestions come
+   * only from the open file + the visible screen + small keyword lists —
+   * no LSP, no whole-project symbols. The popup itself lives in Phase 2;
+   * this phase is detection, words, and loading the open file. */
+
+  const NANO_KEYWORDS = {
+    js: ['function', 'const', 'let', 'var', 'return', 'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'break', 'continue', 'class', 'extends', 'new', 'this', 'typeof', 'instanceof', 'try', 'catch', 'finally', 'throw', 'async', 'await', 'import', 'export', 'from', 'default', 'null', 'undefined', 'true', 'false', 'console', 'require', 'module', 'exports', 'document', 'window', 'Array', 'Object', 'String', 'Number', 'Promise'],
+    py: ['def', 'class', 'return', 'if', 'elif', 'else', 'for', 'while', 'break', 'continue', 'pass', 'import', 'from', 'as', 'with', 'try', 'except', 'finally', 'raise', 'lambda', 'None', 'True', 'False', 'self', 'print', 'len', 'range', 'str', 'int', 'list', 'dict', 'set', 'tuple', 'open'],
+    c: ['int', 'char', 'void', 'float', 'double', 'long', 'short', 'unsigned', 'signed', 'return', 'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'break', 'continue', 'struct', 'enum', 'typedef', 'const', 'static', 'extern', 'include', 'define', 'sizeof', 'NULL'],
+    html: ['div', 'span', 'html', 'head', 'body', 'title', 'script', 'style', 'link', 'meta', 'class', 'href', 'src', 'input', 'button', 'form', 'label', 'table', 'ul', 'li', 'p'],
+    css: ['color', 'background', 'margin', 'padding', 'border', 'display', 'flex', 'grid', 'font-size', 'width', 'height', 'position', 'absolute', 'relative', 'block', 'none', 'solid'],
+    sh: ['echo', 'cd', 'ls', 'cat', 'grep', 'sed', 'awk', 'if', 'then', 'else', 'fi', 'for', 'do', 'done', 'while', 'function', 'return', 'exit', 'export', 'source', 'test'],
+    json: ['true', 'false', 'null'],
+    md: [],
+    rs: ['fn', 'let', 'mut', 'const', 'struct', 'enum', 'impl', 'trait', 'pub', 'use', 'mod', 'return', 'if', 'else', 'for', 'while', 'loop', 'match', 'break', 'continue', 'Some', 'None', 'Ok', 'Err', 'Result', 'Vec', 'String', 'println'],
+    go: ['func', 'var', 'const', 'type', 'struct', 'interface', 'package', 'import', 'return', 'if', 'else', 'for', 'range', 'switch', 'case', 'break', 'continue', 'defer', 'go', 'chan', 'map', 'string', 'int', 'bool', 'nil', 'fmt'],
+  };
+  const NANO_EXTS = { js: 'js', mjs: 'js', jsx: 'js', ts: 'js', tsx: 'js', py: 'py', c: 'c', h: 'c', cpp: 'c', hpp: 'c', html: 'html', htm: 'html', css: 'css', scss: 'css', sh: 'sh', bash: 'sh', json: 'json', md: 'md', rs: 'rs', go: 'go' };
+  const extOf = (file) => {
+    const m = /\.([A-Za-z0-9]+)$/.exec(file || '');
+    return (m && NANO_EXTS[m[1].toLowerCase()]) || '';
+  };
+
+  // `nano file`, `sudo nano file`, `nano -w file`, `nano +12 file` →
+  // { file } (file may be null when nano opens an empty buffer).
+  function parseNanoCommand(cmd) {
+    if (!cmd) return null;
+    const parts = cmd.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
+    let i = 0;
+    if (parts[0] === 'sudo') i = 1;
+    if (parts[i] !== 'nano') return null;
+    i++;
+    let file = null;
+    for (; i < parts.length; i++) {
+      const p = parts[i];
+      if (p === '--') continue;
+      if (/^-\S/.test(p)) continue; // flags: -w, -l, -c, -T4
+      if (/^\+\d/.test(p)) continue; // +line flag
+      if (/^\d+$/.test(p)) continue; // a flag's numeric argument (e.g. -l 10)
+      file = p.replace(/^["']|["']$/g, '');
+    }
+    return { file };
+  }
+
+  // nano is the foreground app when the submitted command parses as nano
+  // AND the screen shows nano's UI (title bar, or the ^G help footer).
+  // The command alone can't prove it — the user may have exited already.
+  function nanoActive(tab) {
+    const parsed = parseNanoCommand(tab.current && tab.current.command);
+    if (!parsed) return null;
+    try {
+      const b = tab.term.buffer.active;
+      const top = b.getLine(0);
+      if (top && /GNU nano/.test(top.translateToString(true))) return parsed;
+      for (let i = Math.max(0, b.length - 2); i < b.length; i++) {
+        const line = b.getLine(i);
+        if (line && /\^G Get Help/.test(line.translateToString(true))) return parsed;
+      }
+      return null;
+    } catch { return null; }
+  }
+
+  // The word being typed, read off the cursor line (nano's screen is the
+  // source of truth — the pty echo lags a keystroke behind onData).
+  function wordBeforeCursor(tab) {
+    try {
+      const b = tab.term.buffer.active;
+      const line = b.getLine(b.cursorY);
+      if (!line) return '';
+      const s = line.translateToString(true).slice(0, b.cursorX);
+      const m = s.match(/[\w$]+$/);
+      return m ? m[0] : '';
+    } catch { return ''; }
+  }
+
+  // Every word in the open file (if readable) plus every word visible on
+  // screen — the screen copy covers unsaved edits. Returns word → count.
+  function collectWords(tab, fileText) {
+    const counts = new Map();
+    const add = (text) => {
+      if (!text) return;
+      for (const m of text.matchAll(/[A-Za-z_$][\w$]*/g)) {
+        const w = m[0];
+        if (w.length < 2) continue;
+        counts.set(w, (counts.get(w) || 0) + 1);
+      }
+    };
+    add(fileText);
+    try {
+      const b = tab.term.buffer.active;
+      for (let i = 0; i < b.length; i++) {
+        const line = b.getLine(i);
+        if (line) add(line.translateToString(true));
+      }
+    } catch {}
+    return counts;
+  }
+
+  // Prefix match (case-insensitive), most frequent first, then A–Z, max 8.
+  // The exact word itself is never offered — it is already typed.
+  function rankSuggestions(prefix, counts, ext) {
+    const q = prefix.toLowerCase();
+    const out = [];
+    for (const [word, n] of counts) {
+      if (word.toLowerCase() === q) continue;
+      if (word.toLowerCase().startsWith(q)) out.push({ word, kind: 'word', freq: n });
+    }
+    for (const kw of NANO_KEYWORDS[ext] || []) {
+      if (kw.toLowerCase().startsWith(q) && kw.toLowerCase() !== q && !counts.has(kw)) {
+        out.push({ word: kw, kind: 'keyword', freq: 0 });
+      }
+    }
+    out.sort((a, b) => b.freq - a.freq || (a.word < b.word ? -1 : a.word > b.word ? 1 : 0));
+    return out.slice(0, 8);
+  }
+
+  // Load the file nano was opened with (once per path). Relative paths
+  // resolve against the chat cwd — if the user cd'd elsewhere in the
+  // shell, the read misses and screen words carry the suggestions.
+  async function refreshNanoFile(tab, parsed) {
+    const file = parsed && parsed.file;
+    if (!file) { tab.nanoFile = null; return; }
+    let abs = file;
+    if (!abs.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(abs)) {
+      const cwd = (T.opts.getCwd && T.opts.getCwd()) || '';
+      abs = cwd ? cwd.replace(/\/$/, '') + '/' + file : file;
+    }
+    if (tab.nanoFile && tab.nanoFile.path === abs) return;
+    tab.nanoFile = { path: abs, text: '', ext: extOf(abs) };
+    try {
+      const r = await window.api.readFileText(abs);
+      if (r && r.ok && tab.nanoFile && tab.nanoFile.path === abs) tab.nanoFile.text = r.text || '';
+    } catch {}
+  }
+
+  // Called when a command is submitted: nano may have just started (load
+  // its file) or just exited (drop the cached file).
+  function nanoOnCommand(tab) {
+    const parsed = parseNanoCommand(tab.current && tab.current.command);
+    if (parsed) refreshNanoFile(tab, parsed);
+    else tab.nanoFile = null;
+  }
+
+  /* ---------- nano autocomplete: popup ----------
+   * One shared DOM popup, absolutely positioned over #term-body at the
+   * cursor. Printable keys are never intercepted — they flow to the pty
+   * and the popup re-filters from the buffer after the echo arrives. */
+
+  let nanoEl = null;
+  function nanoPopupEl() {
+    if (!nanoEl) {
+      nanoEl = el('div', 'nano-complete');
+      nanoEl.hidden = true;
+      $('#term-body').append(nanoEl);
+    }
+    return nanoEl;
+  }
+
+  function nanoHide(tab) {
+    if (tab && tab.nano) { tab.nano.open = false; tab.nano.items = []; }
+    if (nanoEl) nanoEl.hidden = true;
+  }
+
+  // Recompute after output arrives (debounced): the buffer lags onData by
+  // one echo, so the word is read from the screen, not from keystrokes.
+  function nanoSchedule(tab) {
+    if (!tab.nano || T.opts.nanoComplete === false) return;
+    clearTimeout(tab.nano.timer);
+    tab.nano.timer = setTimeout(() => nanoRefresh(tab, false), 40);
+  }
+
+  function nanoRefresh(tab, force) {
+    if (!tab.nano || T.opts.nanoComplete === false) { nanoHide(tab); return; }
+    if (tab !== T.active) return;
+    // A paste hides the popup for one cycle; the next keystroke brings it
+    // back from the fresh buffer.
+    if (tab.nano.pasteHide) { tab.nano.pasteHide = false; nanoHide(tab); return; }
+    const parsed = nanoActive(tab);
+    if (!parsed) { nanoHide(tab); return; }
+    const prefix = wordBeforeCursor(tab);
+    // Accepting a suggestion writes its suffix to the pty; the echo would
+    // otherwise re-show the popup for the just-completed word.
+    if (tab.nano.justAccepted) { tab.nano.justAccepted = false; nanoHide(tab); return; }
+    if (!force && prefix.length < 2) { nanoHide(tab); return; }
+    const counts = collectWords(tab, tab.nanoFile ? tab.nanoFile.text : '');
+    const ext = tab.nanoFile ? tab.nanoFile.ext : extOf(parsed.file || '');
+    const items = rankSuggestions(prefix, counts, ext);
+    if (!items.length) { nanoHide(tab); return; }
+    tab.nano.items = items;
+    tab.nano.prefix = prefix;
+    tab.nano.active = 0;
+    tab.nano.open = true;
+    nanoRender(tab);
+  }
+
+  function nanoRender(tab) {
+    const box = nanoPopupEl();
+    box.innerHTML = '';
+    tab.nano.items.forEach((it, i) => {
+      const row = el('button', 'nano-item' + (i === tab.nano.active ? ' active' : ''));
+      row.type = 'button';
+      const w = el('span', 'nano-word');
+      w.textContent = it.word;
+      const k = el('span', 'nano-kind');
+      k.textContent = it.kind;
+      row.append(w, k);
+      // mousedown (not click) + preventDefault: clicking must not blur the
+      // terminal before the accept lands.
+      row.onmousedown = (e) => { e.preventDefault(); nanoAccept(tab, i); };
+      box.append(row);
+    });
+    box.hidden = false;
+    if (!nanoPosition(tab)) nanoHide(tab);
+  }
+
+  // Cursor cell → pixels, from the rendered screen rect. Flips above the
+  // cursor line when it would overflow the bottom of the pane.
+  // Returns false when the screen rect is unavailable (nothing to anchor
+  // to — the caller hides the popup instead of showing it unanchored).
+  function nanoPosition(tab) {
+    const box = nanoPopupEl();
+    const body = $('#term-body');
+    const screen = tab.pane.querySelector('.xterm-screen');
+    if (!screen || !body) return false;
+    const sr = screen.getBoundingClientRect();
+    const br = body.getBoundingClientRect();
+    const cellW = sr.width / tab.term.cols;
+    const cellH = sr.height / tab.term.rows;
+    const b = tab.term.buffer.active;
+    let left = sr.left - br.left + b.cursorX * cellW;
+    let top = sr.top - br.top + (b.cursorY + 1) * cellH;
+    const maxLeft = body.clientWidth - box.offsetWidth - 4;
+    if (left > maxLeft) left = Math.max(4, maxLeft);
+    if (top + box.offsetHeight > body.clientHeight - 4) {
+      top = sr.top - br.top + b.cursorY * cellH - box.offsetHeight;
+      if (top < 0) top = 4;
+    }
+    box.style.left = left + 'px';
+    box.style.top = top + 'px';
+    return true;
+  }
+
+  // Accept: write only the not-yet-typed suffix, so nano receives it as
+  // typed text. Nothing else is sent — no fake keystrokes, no buffer edits.
+  // The popup can be a keystroke stale (40ms debounce) and nano may have
+  // exited since it rendered: only complete when the word on screen still
+  // extends the rendered prefix, the item still completes it, and nano is
+  // still the foreground app. Otherwise just close the popup.
+  function nanoAccept(tab, idx) {
+    const st = tab.nano;
+    if (!st || !st.open || !st.items[idx]) return;
+    const item = st.items[idx];
+    const cur = wordBeforeCursor(tab);
+    if (!nanoActive(tab) || !cur.toLowerCase().startsWith(st.prefix.toLowerCase()) || !item.word.toLowerCase().startsWith(cur.toLowerCase())) {
+      nanoHide(tab);
+      return;
+    }
+    const suffix = item.word.slice(cur.length);
+    st.justAccepted = true;
+    nanoHide(tab);
+    if (suffix) window.api.termWrite(tab.id, suffix);
+    tab.term.focus();
+  }
+
+  function setNanoComplete(v) {
+    T.opts.nanoComplete = v !== false;
+    if (!T.opts.nanoComplete) for (const t of T.tabs) nanoHide(t);
+  }
+
   /* ---------- appearance ---------- */
 
   function updateTheme() {
@@ -412,6 +720,7 @@
 
   function init(opts) {
     T.opts = opts || {};
+    T.opts.nanoComplete = T.opts.nanoComplete !== false;
     T.fontSize = Number(T.opts.fontSize) || 13;
     T.fontFamily = T.opts.fontFamily || MONO;
 
@@ -457,7 +766,7 @@
 
     window.api.on('term-data', ({ id, data }) => {
       const tab = T.tabs.find((t) => t.id === id);
-      if (tab) tab.term.write(data);
+      if (tab) { tab.term.write(data); nanoSchedule(tab); }
       else {
         if (!T.early.has(id)) T.early.set(id, []);
         T.early.get(id).push(data);
@@ -486,5 +795,7 @@
     setView(saved === 'split' || saved === 'term' ? saved : 'chat');
   }
 
-  window.TermUI = { init, setView, toggle, newTab, sendText, updateTheme, setFont, setFontFamily, askAi, focus };
+  // _nano is a test hook (headless harness + launch test drive the popup
+  // through it); it is not part of the app's UI surface.
+  window.TermUI = { init, setView, toggle, newTab, sendText, updateTheme, setFont, setFontFamily, askAi, focus, setNanoComplete, _nano: { parseNanoCommand, rankSuggestions, wordBeforeCursor, nanoActive, extOf, getActiveTab: () => T.active, refresh: nanoRefresh, accept: nanoAccept, hide: nanoHide, schedule: nanoSchedule } };
 })();
