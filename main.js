@@ -1012,6 +1012,47 @@ function registerIpc() {
     } catch { return { ok: false }; }
   });
 
+  // Sidebar file tree: list one directory of the chat's cwd, and read
+  // one file as a chat card. Both go through the filetools scope
+  // checks — cwd only, no traversal, no symlink escapes, no .git /
+  // node_modules / dist / secrets. The tree never sends a path it did
+  // not get back from files:list (or the root), so a hostile filename
+  // cannot smuggle a `..` into a read — and main would refuse it anyway.
+  ipcMain.handle('files:list', (_e, chatId, relPath) => {
+    const chat = getChatOrNull(chatId);
+    if (!chat) return { ok: false, error: 'Chat not found.' };
+    const r = ft.listDirScoped(chat.cwd, relPath || '.', { recursive: false, maxEntries: 500 });
+    if (!r.ok) return { ok: false, error: r.error };
+    // Map symlinks to their target type so a link to a dir expands and
+    // a link to a file reads. A broken link stays type 'link'.
+    const entries = r.entries.map((e) => {
+      if (e.type !== 'link') return e;
+      try {
+        const st = fs.statSync(path.join(r.path, e.name));
+        return { ...e, type: st.isDirectory() ? 'dir' : 'file' };
+      } catch { return e; }
+    });
+    return { ok: true, entries, truncated: r.truncated };
+  });
+
+  ipcMain.handle('files:read', (_e, chatId, relPath) => {
+    const chat = getChatOrNull(chatId);
+    if (!chat) return { ok: false, error: 'Chat not found.' };
+    const r = ft.readFileScoped(chat.cwd, relPath);
+    if (!r.ok) return { ok: false, error: r.error };
+    let text = r.text;
+    if (text.length > MAX_OUTPUT_CHARS) {
+      const h = MAX_OUTPUT_CHARS / 2;
+      text = text.slice(0, h) + '\n...[output truncated]...\n' + text.slice(-h);
+    }
+    const msg = { role: 'tool', tool_name: 'file_read', content: text || '(empty file)', meta: fileMeta('read', relPath, 'ran') };
+    // Persist the card in the chat — except while a turn is running on
+    // this chat, when the turn's in-memory copy would clobber it on its
+    // next write. The card still renders in-session either way.
+    if (!live.has(chatId)) { chat.messages.push(msg); writeChat(chat); }
+    return { ok: true, message: msg };
+  });
+
   ipcMain.handle('clipboard:read', () => clipboard.readText());
   ipcMain.handle('clipboard:write', (_e, text) => { clipboard.writeText(String(text)); return true; });
   ipcMain.handle('open:external', (_e, url) => {

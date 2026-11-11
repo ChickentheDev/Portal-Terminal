@@ -70,6 +70,7 @@
     view: 'chat',
     fontSize: 13,
     blocksHidden: false, // user hid the blocks rail; new commands won't re-show it
+    search: { tab: null, query: '', resultIndex: -1, resultCount: 0 }, // the shared search bar belongs to one tab at a time
   };
 
   const themeNow = () => THEMES[document.body.dataset.theme] || THEMES.dark;
@@ -81,7 +82,10 @@
   function applyView(v) {
     T.view = v;
     document.body.dataset.view = v;
-    document.querySelectorAll('.seg button').forEach((b) => b.classList.toggle('on', b.dataset.view === v));
+    // Scoped to the top-bar view switcher: the sidebar Chats/Files
+    // toggle reuses .seg, and a global selector would strip its 'on'
+    // class and steal its clicks.
+    document.querySelectorAll('#top .seg button').forEach((b) => b.classList.toggle('on', b.dataset.view === v));
     save('view', v);
   }
 
@@ -124,6 +128,9 @@
 
   function select(tab) {
     nanoHide();
+    // The search bar is shared: switching tabs closes it (and clears the
+    // old tab's decorations) instead of showing a stale query/count.
+    if (T.search.tab && T.search.tab !== tab) searchClose({ focus: false });
     T.active = tab;
     for (const t of T.tabs) t.pane.hidden = t !== tab;
     renderTabs();
@@ -139,11 +146,15 @@
   const focus = () => { if (T.active) T.active.term.focus(); };
 
   async function newTab(cwd) {
-    if (typeof Terminal === 'undefined' || typeof FitAddon === 'undefined') {
+    if (typeof Terminal === 'undefined' || typeof FitAddon === 'undefined' || typeof SearchAddon === 'undefined') {
       alert('The terminal library is missing. Run "npm install" in the app folder.');
       return null;
     }
     if (T.view === 'chat') applyView('split');
+
+    // A new tab is a tab switch too: the shared bar closes rather than
+    // searching a tab that is no longer active.
+    if (T.search.tab) searchClose({ focus: false });
 
     const n = ++T.seq;
     const pane = el('div', 'term-pane');
@@ -156,13 +167,26 @@
       scrollback: 5000,
       theme: themeNow(),
       macOptionIsMeta: true,
+      // Required by @xterm/addon-search: match decorations and the
+      // onDidChangeResults count are proposed APIs, and findNext with
+      // decorations throws without this flag.
+      allowProposedApi: true,
     });
     const fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
+    const search = new SearchAddon.SearchAddon();
+    term.loadAddon(search);
 
-    const tab = { n, pane, term, fit, id: null, title: 'Terminal ' + n, dead: false, blocks: [], current: null, inputBuf: '', inputStale: false, nanoFile: null, nano: { open: false, items: [], active: 0, prefix: '', force: false, justAccepted: false, pasteHide: false, timer: 0 }, shellIntegrated: false, markerAnchor: null, markerAnchorTimer: 0, markerStack: [], pendingCmd: '' };
+    const tab = { n, pane, term, fit, search, id: null, title: 'Terminal ' + n, dead: false, blocks: [], current: null, inputBuf: '', inputStale: false, nanoFile: null, nano: { open: false, items: [], active: 0, prefix: '', force: false, justAccepted: false, pasteHide: false, timer: 0 }, shellIntegrated: false, markerAnchor: null, markerAnchorTimer: 0, markerStack: [], pendingCmd: '' };
     T.tabs.push(tab);
     T.active = tab;
+    // The count label follows this tab's addon, but only while the bar
+    // belongs to this tab — another tab's search never rewrites it.
+    try {
+      search.onDidChangeResults((ev) => {
+        if (T.search.tab === tab) setSearchCount(ev.resultIndex, ev.resultCount, true);
+      });
+    } catch {}
     for (const t of T.tabs) t.pane.hidden = t !== tab;
     term.open(pane);
     renderTabs();
@@ -211,6 +235,7 @@
 
   function closeTab(tab) {
     nanoHide(tab);
+    if (T.search.tab === tab) searchClose({ focus: false });
     tab.dead = true;
     if (tab.id) window.api.termKill(tab.id);
     try { tab.term.dispose(); } catch {}
@@ -246,6 +271,12 @@
     const mod = e.ctrlKey || e.metaKey;
     const k = (e.key || '').toLowerCase();
     const stop = () => { e.preventDefault(); return false; };
+    // Ctrl+F / Cmd+F opens terminal search. The key never reaches the
+    // pty — the shell's forward-char is the price of having search.
+    if (mod && k === 'f') { searchOpen(tab); return stop(); }
+    // Esc with the search bar open for this tab closes the bar instead
+    // of reaching the shell (the bar's input handles Esc while focused).
+    if (k === 'escape' && T.search.tab === tab) { searchClose(); return stop(); }
     // Nano autocomplete owns Tab/Enter/arrows/Esc while its popup is open.
     // Esc is SWALLOWED while the popup is open (unlike the first draft,
     // which passed it through): a lone Escape reaching nano makes nano
@@ -277,6 +308,101 @@
     }
     if (mod && e.shiftKey && k === 'v') { pasteInto(tab); return stop(); }
     return true;
+  }
+
+  /* ---------- terminal search ----------
+   * One shared bar (#term-search) owned by the tab it was opened on.
+   * The @xterm/addon-search instance per tab owns highlighting and the
+   * match count (onDidChangeResults); this section only wires keys, the
+   * bar, and the count label. Plain text, case-insensitive — the addon
+   * is never put in regex mode, so a query with regex characters is
+   * literal and can never throw. */
+
+  function setSearchCount(resultIndex, resultCount, hasQuery) {
+    T.search.resultIndex = resultIndex;
+    T.search.resultCount = resultCount;
+    const label = $('#term-search-count');
+    if (!label) return;
+    const text = window.PortalTermSearch
+      ? window.PortalTermSearch.formatSearchCount(resultIndex, resultCount, hasQuery)
+      : (hasQuery && !resultCount ? 'No results' : '');
+    label.textContent = text;
+    label.classList.toggle('no-match', text === 'No results');
+  }
+
+  function searchOptions(incremental) {
+    const theme = document.body.dataset.theme || 'dark';
+    if (window.PortalTermSearch) return window.PortalTermSearch.searchOptions(theme, incremental);
+    return { regex: false, wholeWord: false, caseSensitive: false, incremental: !!incremental };
+  }
+
+  function searchOpen(tab) {
+    tab = tab || T.active;
+    if (!tab || !tab.search || tab.dead) return;
+    nanoHide(tab);
+    T.search.tab = tab;
+    const input = $('#term-search-input');
+    // Pre-fill with the current selection, like most terminals do —
+    // first line only, trimmed, so a multi-line selection stays sane.
+    if (!input.value) {
+      try {
+        const sel = tab.term.getSelection();
+        if (sel) {
+          const first = sel.split(/\r?\n/)[0].trim().slice(0, 200);
+          if (first) input.value = first;
+        }
+      } catch {}
+    }
+    $('#term-search').hidden = false;
+    if (input.value) searchRun('next', true);
+    input.focus();
+    input.select();
+  }
+
+  function searchClose(opts) {
+    const st = T.search;
+    const tab = st.tab;
+    st.tab = null;
+    st.query = '';
+    st.resultIndex = -1;
+    st.resultCount = 0;
+    const bar = $('#term-search');
+    if (bar) bar.hidden = true;
+    const label = $('#term-search-count');
+    if (label) { label.textContent = ''; label.classList.remove('no-match'); }
+    if (tab) {
+      try { tab.search.clearDecorations(); } catch {}
+      try { tab.term.clearSelection(); } catch {}
+      if ((!opts || opts.focus !== false) && !tab.dead) tab.term.focus();
+    }
+  }
+
+  // dir: 'next' | 'prev'. incremental: true while typing (the current
+  // match holds while it still matches the longer query); false on
+  // Enter, which must advance to the next match.
+  function searchRun(dir, incremental) {
+    const st = T.search;
+    if (!st.tab || !st.tab.search || st.tab.dead) return;
+    const input = $('#term-search-input');
+    const q = (input.value || '');
+    st.query = q;
+    if (!q) {
+      try { st.tab.search.clearDecorations(); } catch {}
+      setSearchCount(-1, 0, false);
+      return;
+    }
+    let found = false;
+    try {
+      found = dir === 'prev'
+        ? st.tab.search.findPrevious(q, searchOptions(false))
+        : st.tab.search.findNext(q, searchOptions(incremental));
+    } catch { found = false; }
+    if (!found) {
+      // No match at all: clear the previous query's decorations so a
+      // stale highlight never pretends to be a result.
+      try { st.tab.search.clearDecorations(); } catch {}
+      setSearchCount(-1, 0, true);
+    }
   }
 
   /* ---------- talking to the chat ---------- */
@@ -859,8 +985,28 @@
     T.fontSize = Number(T.opts.fontSize) || 13;
     T.fontFamily = T.opts.fontFamily || MONO;
 
-    document.querySelectorAll('.seg button').forEach((b) => (b.onclick = () => setView(b.dataset.view)));
+    document.querySelectorAll('#top .seg button').forEach((b) => (b.onclick = () => setView(b.dataset.view)));
     $('#term-new').onclick = () => newTab();
+    $('#term-search-btn').onclick = () => { if (T.active) searchOpen(T.active); };
+    const sInput = $('#term-search-input');
+    sInput.addEventListener('input', () => searchRun('next', true));
+    sInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); searchRun(e.shiftKey ? 'prev' : 'next', false); }
+      else if (e.key === 'Escape') { e.preventDefault(); searchClose(); }
+    });
+    sInput.addEventListener('blur', () => {
+      // The addon's own pattern: the active decoration sits on top of
+      // the selection, so clearing it on blur reveals the match.
+      const st = T.search;
+      if (st.tab && st.tab.search) { try { st.tab.search.clearActiveDecoration(); } catch {} }
+    });
+    const bindSearchBtn = (id, fn) => {
+      // mousedown + preventDefault: clicking must not blur the input.
+      $(id).addEventListener('mousedown', (e) => { e.preventDefault(); fn(); });
+    };
+    bindSearchBtn('#term-search-prev', () => searchRun('prev', false));
+    bindSearchBtn('#term-search-next', () => searchRun('next', false));
+    bindSearchBtn('#term-search-close', () => searchClose());
     $('#term-hide').onclick = () => setView('chat');
     $('#term-ask').onclick = askAi;
     $('#term-blocks-toggle').onclick = () => {
@@ -939,6 +1085,7 @@
 
   // _nano is a test hook (headless harness + launch test drive the popup
   // through it); it is not part of the app's UI surface. _blocks is the
-  // same for the shell-integration marker path.
-  window.TermUI = { init, setView, toggle, newTab, sendText, updateTheme, setFont, setFontFamily, askAi, focus, setNanoComplete, _nano: { parseNanoCommand, rankSuggestions, wordBeforeCursor, nanoActive, extOf, getActiveTab: () => T.active, refresh: nanoRefresh, accept: nanoAccept, hide: nanoHide, schedule: nanoSchedule }, _blocks: { onOsc, commandFromAnchor, getActiveTab: () => T.active } };
+  // same for the shell-integration marker path. _search is the same for
+  // the terminal search bar.
+  window.TermUI = { init, setView, toggle, newTab, sendText, updateTheme, setFont, setFontFamily, askAi, focus, setNanoComplete, _nano: { parseNanoCommand, rankSuggestions, wordBeforeCursor, nanoActive, extOf, getActiveTab: () => T.active, refresh: nanoRefresh, accept: nanoAccept, hide: nanoHide, schedule: nanoSchedule }, _blocks: { onOsc, commandFromAnchor, getActiveTab: () => T.active }, _search: { open: searchOpen, close: searchClose, run: searchRun, getState: () => ({ open: !!T.search.tab, tab: T.search.tab ? T.search.tab.n : null, query: T.search.query, resultIndex: T.search.resultIndex, resultCount: T.search.resultCount }), getActiveTab: () => T.active } };
 })();

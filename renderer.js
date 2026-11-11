@@ -138,6 +138,196 @@
     }
   }
 
+  /* ---------- file tree ---------- */
+
+  const TREE = {
+    mode: 'chats', // 'chats' | 'files'
+    loaded: false,
+    stale: true,
+    cwd: null, // cwd the tree was last loaded for
+    expanded: new Set(), // rel paths of expanded dirs
+    children: new Map(), // rel path -> sorted entries
+    truncated: new Set(), // rel paths whose listing hit the 500 cap
+    errors: new Map(), // rel path -> error text for a failed listing
+    refreshing: false,
+  };
+
+  function setSideMode(mode) {
+    TREE.mode = mode;
+    document.querySelectorAll('.side-seg button').forEach((b) => b.classList.toggle('on', b.dataset.side === mode));
+    $('#chat-list').hidden = mode !== 'chats';
+    $('#search').hidden = mode !== 'chats';
+    $('#file-tree-wrap').hidden = mode !== 'files';
+    if (mode === 'files') { renderTree(); refreshFileTree(); }
+  }
+
+  function treeReset() {
+    TREE.loaded = false;
+    TREE.stale = true;
+    TREE.cwd = null;
+    TREE.expanded.clear();
+    TREE.children.clear();
+    TREE.truncated.clear();
+    TREE.errors.clear();
+  }
+
+  async function loadTreeDir(rel) {
+    const u = window.PortalFileTree;
+    let r;
+    try { r = await window.api.listFiles(S.cur.id, rel); } catch { r = { ok: false, error: 'Could not list files.' }; }
+    if (!r || !r.ok) {
+      TREE.errors.set(rel, (r && r.error) || 'Could not list files.');
+      TREE.children.delete(rel);
+      TREE.truncated.delete(rel);
+      return false;
+    }
+    TREE.errors.delete(rel);
+    TREE.children.set(rel, u.sortTreeEntries(r.entries || []));
+    if (r.truncated) TREE.truncated.add(rel);
+    else TREE.truncated.delete(rel);
+    return true;
+  }
+
+  function treeNote(text, cls) {
+    const d = el('div', 'tree-note' + (cls ? ' ' + cls : ''));
+    d.textContent = text;
+    return d;
+  }
+
+  function treeRow(rel, entry, depth) {
+    const row = el('div', 'tree-row' + (entry.type === 'dir' ? ' dir' : ' file'));
+    row.style.setProperty('--depth', depth);
+    row.tabIndex = 0;
+    row.setAttribute('role', 'treeitem');
+    const caret = el('span', 'tree-caret');
+    caret.textContent = entry.type === 'dir' ? (TREE.expanded.has(rel) ? '▾' : '▸') : '';
+    const name = el('span', 'tree-name');
+    name.textContent = entry.name;
+    name.title = rel;
+    row.append(caret, name);
+    const activate = () => {
+      if (entry.type === 'dir') toggleTreeDir(rel);
+      else openTreeFile(rel);
+    };
+    row.onclick = activate;
+    row.onkeydown = (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); }
+    };
+    return row;
+  }
+
+  function renderTreeDir(rel, depth, out) {
+    if (TREE.errors.has(rel)) {
+      const note = treeNote(TREE.errors.get(rel), 'tree-err');
+      note.style.setProperty('--depth', depth);
+      out.append(note);
+      return;
+    }
+    const kids = TREE.children.get(rel);
+    if (!kids) return;
+    if (!kids.length) {
+      const note = treeNote('Empty folder');
+      note.style.setProperty('--depth', depth);
+      out.append(note);
+      return;
+    }
+    for (const entry of kids) {
+      const childRel = window.PortalFileTree.joinRel(rel, entry.name);
+      out.append(treeRow(childRel, entry, depth));
+      if (entry.type === 'dir' && TREE.expanded.has(childRel)) renderTreeDir(childRel, depth + 1, out);
+    }
+    if (TREE.truncated.has(rel)) {
+      const note = treeNote(`… ${window.PortalFileTree.MAX_TREE_ENTRIES} entries shown`);
+      note.style.setProperty('--depth', depth);
+      out.append(note);
+    }
+  }
+
+  function renderTree() {
+    const box = $('#file-tree');
+    box.innerHTML = '';
+    if (!window.PortalFileTree) {
+      box.append(treeNote('File tree helpers failed to load — restart the app.', 'tree-err'));
+      return;
+    }
+    if (!S.cur) return;
+    if (!TREE.loaded) {
+      box.append(treeNote('Loading…'));
+      return;
+    }
+    const frag = document.createDocumentFragment();
+    renderTreeDir('', 0, frag);
+    box.append(frag);
+  }
+
+  async function refreshFileTree() {
+    if (TREE.mode !== 'files' || !S.cur) { TREE.stale = true; return; }
+    if (TREE.refreshing) { TREE.stale = true; return; }
+    if (TREE.cwd !== S.cur.cwd) treeReset();
+    TREE.refreshing = true;
+    try {
+      if (!window.PortalFileTree) { renderTree(); return; }
+      await loadTreeDir('');
+      // Drop expanded dirs that no longer exist (e.g. deleted
+      // externally), shallow first so a pruned parent also prunes its
+      // children. A deleted dir would otherwise be re-fetched (and
+      // fail) on every refresh, and its stale entry would linger.
+      const u = window.PortalFileTree;
+      const byDepth = [...TREE.expanded].sort((a, b) => a.split('/').length - b.split('/').length);
+      for (const rel of byDepth) {
+        const slash = rel.lastIndexOf('/');
+        const parent = slash < 0 ? '' : rel.slice(0, slash);
+        const kids = TREE.children.get(parent);
+        if (!kids || !kids.some((e) => e.name === u.baseName(rel) && e.type === 'dir')) {
+          TREE.expanded.delete(rel);
+          TREE.children.delete(rel);
+          TREE.errors.delete(rel);
+          TREE.truncated.delete(rel);
+          continue;
+        }
+        await loadTreeDir(rel);
+      }
+      TREE.loaded = true;
+      TREE.cwd = S.cur.cwd;
+      TREE.stale = false;
+      renderTree();
+    } finally {
+      TREE.refreshing = false;
+      if (TREE.stale && TREE.mode === 'files') refreshFileTree();
+    }
+  }
+
+  async function toggleTreeDir(rel) {
+    if (TREE.expanded.has(rel)) {
+      TREE.expanded.delete(rel);
+      renderTree();
+      return;
+    }
+    await loadTreeDir(rel);
+    TREE.expanded.add(rel);
+    renderTree();
+  }
+
+  async function openTreeFile(rel) {
+    if (!S.cur) return;
+    let r;
+    try { r = await window.api.readFile(S.cur.id, rel); } catch { r = { ok: false, error: 'Could not read file.' }; }
+    removeEmpty();
+    if (r && r.ok && r.message) {
+      S.cur.messages.push(r.message);
+      appendMessage(r.message);
+    } else {
+      // A refused read (oversize, binary, outside cwd) is still shown,
+      // as an error file card — never a silent no-op.
+      appendMessage({
+        role: 'tool', tool_name: 'file_read',
+        content: (r && r.error) || 'Could not read file.',
+        meta: { kind: 'file', op: 'read', path: rel, command: 'read ' + rel, status: 'error' },
+      });
+    }
+    scrollDown();
+  }
+
   /* ---------- rendering messages ---------- */
 
   function userMsg(m) {
@@ -522,6 +712,9 @@
     const cwd = $('#cwd');
     cwd.textContent = shortPath(S.cur.cwd);
     cwd.title = (S.cur.cwd || '') + '\nClick to change the working directory';
+    const fc = $('#files-cwd');
+    fc.textContent = shortPath(S.cur.cwd);
+    fc.title = S.cur.cwd || '';
   }
   function renderAuto() {
     const a = $('#auto');
@@ -538,6 +731,7 @@
     applyLive(r.live);
     updateComposer();
     refreshList();
+    refreshFileTree();
     if (window.innerWidth <= 820) $('#sidebar').classList.add('hidden');
     inputEl.focus();
   }
@@ -565,12 +759,14 @@
       if (!S.cur || p.chatId !== S.cur.id) return;
       const m = p.message;
       S.cur.messages.push(m);
-      if (m.meta && m.meta.cwd) { S.cur.cwd = m.meta.cwd; renderHeader(); }
+      if (m.meta && m.meta.cwd && m.meta.cwd !== S.cur.cwd) { S.cur.cwd = m.meta.cwd; renderHeader(); refreshFileTree(); }
       setWorking(false);
       clearStream();
       clearTransient();
       removeEmpty();
       appendMessage(m);
+      // An agent write/edit that applied changes the cwd contents.
+      if (m.meta && m.meta.kind === 'file' && m.meta.status === 'applied') refreshFileTree();
       if (S.running.has(S.cur.id)) setWorking(true);
       scrollDown();
     });
@@ -975,6 +1171,8 @@
 
   function bindUi() {
     $('#new-chat').onclick = () => startNewChat(false);
+    document.querySelectorAll('.side-seg button').forEach((b) => { b.onclick = () => setSideMode(b.dataset.side); });
+    $('#files-refresh').onclick = () => refreshFileTree();
     $('#toggle-side').onclick = () => $('#sidebar').classList.toggle('hidden');
     $('#open-settings').onclick = openSettings;
     $('#open-palette').onclick = () => openPalette();
@@ -1016,6 +1214,7 @@
       if (!S.cur || isRunning()) return;
       S.cur.cwd = await window.api.pickCwd(S.cur.id);
       renderHeader();
+      refreshFileTree();
     };
     $('#auto').onclick = async () => {
       S.auto = !S.auto;

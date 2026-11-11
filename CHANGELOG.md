@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.3.2
+
+### File tree sidebar
+The sidebar has a Chats / Files toggle. Files shows the current
+chat's working directory as a tree — folders first, then files,
+alphabetical — with expand/collapse, and dotfiles shown. Clicking a
+file shows its contents in the chat as a read card, the same card the
+agent's file_read produces (200 KB cap, same truncation), and the card
+is saved in the chat like an agent read. The tree refreshes when the
+working directory changes, when an agent file write or edit applies,
+and from a manual Refresh button. It follows exactly the file-tools
+scope rules: cwd only, no `..` traversal, no symlink escapes, and
+`.git` / `node_modules` / `dist` / secrets are hidden. A directory
+with more than 500 entries shows the first 500 and a note.
+Limits, stated plainly: browse + view only — no create, delete,
+rename, drag-and-drop, or in-tree editing (the agent tools cover
+writes); a read clicked while a turn is running shows in the chat but
+is not saved to the chat file, because the running turn would
+overwrite it; an external change only appears after a refresh.
+
+### Terminal search
+Ctrl+F (Cmd+F on Mac) while the terminal is focused, or the
+magnifier button in the terminal tab bar, opens a search bar over the
+top-right of the terminal. Type to find as you go; Enter steps to the
+next match, Shift+Enter to the previous, Esc closes the bar and puts
+focus back in the terminal. All matches are highlighted (the active
+one in the theme accent) and the bar shows a count like "3 of 12",
+or "No results" in red. Search covers the full scrollback buffer of
+the active tab, not just the visible lines, and is case-insensitive
+plain text — regex characters are matched literally. Each tab has
+its own search; switching tabs, opening a new tab, or closing the
+tab the search belongs to closes the bar and the query is not kept.
+Opening the bar pre-fills it from the current selection. The
+highlight colors follow the active theme.
+Limits, stated plainly: the count is capped at the addon's 1,000
+highlight limit — past that it reads "N of 1000" (stepping still
+works); the count can go stale while new output arrives and refreshes
+on the next search action, not on output; no regex, whole-word, or
+case-sensitive toggle yet; the bar covers the terminal buffer only,
+not the chat or command blocks.
+
 ## 0.3.1
 
 ### Agent file tools

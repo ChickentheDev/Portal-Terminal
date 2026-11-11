@@ -1,8 +1,8 @@
 {
   "name": "portal-terminal",
   "productName": "Portal Terminal",
-  "version": "0.3.1",
-  "description": "Portal Terminal \u2014 a minimal black and white chat app where a local Ollama model can use your terminal.",
+  "version": "0.3.2",
+  "description": "Portal Terminal — a minimal black and white chat app where a local Ollama model can use your terminal.",
   "main": "main.js",
   "author": "Portal Terminal",
   "license": "MIT",
@@ -22,13 +22,14 @@
     "electron-builder": "^25.1.8"
   },
   "dependencies": {
-    "@xterm/xterm": "^5.5.0",
-    "@xterm/addon-fit": "^0.10.0"
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-search": "0.16.0",
+    "@xterm/xterm": "^5.5.0"
   },
   "build": {
     "appId": "com.portalterminal.app",
     "productName": "Portal Terminal",
-    "copyright": "Copyright \u00a9 2026 Portal Terminal",
+    "copyright": "Copyright © 2026 Portal Terminal",
     "directories": {
       "output": "dist"
     },

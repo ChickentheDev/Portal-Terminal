@@ -14,8 +14,19 @@
       <div class="side-top">
         <button id="new-chat" class="btn block">New chat</button>
         <input id="search" type="search" placeholder="Search chats" spellcheck="false" autocomplete="off">
+        <div class="seg side-seg" role="group" aria-label="Sidebar">
+          <button data-side="chats" class="on" title="Past chats">Chats</button>
+          <button data-side="files" title="Files in this chat's working directory">Files</button>
+        </div>
       </div>
       <nav id="chat-list" aria-label="Past chats"></nav>
+      <div id="file-tree-wrap" hidden>
+        <div class="files-head">
+          <span id="files-cwd" class="files-cwd" title=""></span>
+          <button id="files-refresh" class="link-btn" title="Refresh the file tree" aria-label="Refresh the file tree">Refresh</button>
+        </div>
+        <div id="file-tree" aria-label="Files in the working directory"></div>
+      </div>
       <div class="side-bottom">
         <span id="status" class="status" title="Ollama connection"><i></i><span>checking</span></span>
         <button id="open-settings" class="link-btn" title="Settings (Ctrl+,)">Settings</button>
@@ -64,13 +75,24 @@
           <div id="term-head">
             <div id="term-tabs" role="tablist"></div>
             <button id="term-new" class="link-btn" title="New terminal (Ctrl+Shift+T)" aria-label="New terminal">+</button>
+            <button id="term-search-btn" class="link-btn" title="Search terminal (Ctrl+F)" aria-label="Search terminal">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>
+            </button>
             <div class="spacer"></div>
             <button id="term-blocks-toggle" class="chip" title="Show the command blocks for this terminal">Blocks</button>
             <button id="term-ask" class="chip" title="Send the selected text (or the last lines) to the AI">Ask AI about this</button>
             <button id="term-hide" class="link-btn" title="Hide terminal (Ctrl+`)">Hide</button>
           </div>
           <div id="term-blocks" hidden></div>
-          <div id="term-body"></div>
+          <div id="term-body">
+            <div id="term-search" class="term-search" hidden>
+              <input id="term-search-input" type="text" placeholder="Find in terminal" spellcheck="false" autocomplete="off" aria-label="Find in terminal">
+              <span id="term-search-count" class="term-search-count" aria-live="polite"></span>
+              <button id="term-search-prev" class="term-search-btn" type="button" title="Previous match (Shift+Enter)" aria-label="Previous match">↑</button>
+              <button id="term-search-next" class="term-search-btn" type="button" title="Next match (Enter)" aria-label="Next match">↓</button>
+              <button id="term-search-close" class="term-search-btn" type="button" title="Close (Esc)" aria-label="Close search">×</button>
+            </div>
+          </div>
         </section>
       </div>
     </main>
@@ -207,8 +229,11 @@
 
   <script src="node_modules/@xterm/xterm/lib/xterm.js"></script>
   <script src="node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+  <script src="node_modules/@xterm/addon-search/lib/addon-search.js"></script>
   <script src="markdown.js"></script>
   <script src="models.js"></script>
+  <script src="filetree.js"></script>
+  <script src="termsearch.js"></script>
   <script src="terminal.js"></script>
   <script src="renderer.js"></script>
 </body>
