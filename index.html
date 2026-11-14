@@ -40,7 +40,7 @@
         </button>
         <input id="title" value="New chat" spellcheck="false" aria-label="Chat title">
         <div class="spacer"></div>
-        <button id="cwd" class="chip chat-only" title="Working directory. Click to change.">~</button>
+        <button id="cwd" class="chip chat-only" title="Working directory. Click to change."><span id="cwd-path">~</span><span id="cwd-git"></span></button>
         <button id="auto" class="chip chat-only" title="When on, the AI's commands run without asking">Ask first</button>
         <button id="copy-chat" class="chip chat-only">Copy chat</button>
         <button id="export-chat" class="chip chat-only">Export</button>
@@ -78,6 +78,7 @@
             <button id="term-search-btn" class="link-btn" title="Search terminal (Ctrl+F)" aria-label="Search terminal">
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>
             </button>
+            <button id="term-split" class="link-btn" title="Split this terminal into two side-by-side panes" aria-label="Split terminal">Split</button>
             <div class="spacer"></div>
             <button id="term-blocks-toggle" class="chip" title="Show the command blocks for this terminal">Blocks</button>
             <button id="term-ask" class="chip" title="Send the selected text (or the last lines) to the AI">Ask AI about this</button>
@@ -117,6 +118,7 @@
       </label>
       <label>Ollama address
         <input id="s-host" spellcheck="false" autocomplete="off">
+        <span class="field-hint">Another machine? Enter its address, e.g. 192.168.1.10 — the port defaults to 11434. No login support yet.</span>
       </label>
 
       <div class="models" id="s-models">
@@ -132,6 +134,15 @@
         </div>
         <div id="s-models-status" class="field-hint"></div>
         <span class="field-hint">Hugging Face: hf.co/user/repo pulls a GGUF model — no quant defaults to Q4_K_M when present; add :Q4_K_M to pick one. Gated repos need credentials set up on this machine.</span>
+
+        <div class="fallback" id="s-fallback">
+          <label class="check">Fall back to another model if the agent model fails
+            <input id="s-fallback-enabled" type="checkbox" checked>
+            <span class="field-hint">If the agent model errors (for example it crashes or is missing), the next model in this list answers instead. Smaller models are listed first — they are the most likely to load when a big model fails. The configured agent model never changes.</span>
+          </label>
+          <div id="s-fallback-list"></div>
+          <div id="s-fallback-status" class="field-hint"></div>
+        </div>
       </div>
 
       <div class="row3">
@@ -214,9 +225,24 @@
         <span class="field-hint">Real exit codes and durations in command blocks (bash, zsh, fish). Applies to new terminal tabs. Off falls back to the keystroke tracker.</span>
       </label>
 
+      <label class="check">Project context
+        <input id="s-projctx" type="checkbox" checked>
+        <span class="field-hint">Tell the agent about the project at the start of every turn: name, stack, file list, and the start of the README. Shown as a collapsible line under your message.</span>
+      </label>
+
       <label>Your instructions for the AI
         <textarea id="s-instr" rows="8" spellcheck="false"></textarea>
       </label>
+
+      <div class="snippets" id="s-snippets">
+        <div class="models-head">
+          <span>Slash commands</span>
+          <button id="s-snippets-add" class="btn small" type="button">Add command</button>
+        </div>
+        <div id="s-snippets-list"></div>
+        <div id="s-snippets-status" class="field-hint"></div>
+        <span class="field-hint">Your own /commands: a name and a prompt. Use {diff} in the prompt to attach the current uncommitted diff. Saved with the rest of Settings.</span>
+      </div>
 
       <div class="panel-actions">
         <button id="s-reset" class="btn small" type="button">Reset instructions</button>
@@ -232,8 +258,17 @@
   <script src="node_modules/@xterm/addon-search/lib/addon-search.js"></script>
   <script src="markdown.js"></script>
   <script src="models.js"></script>
+  <script src="fallbackchain.js"></script>
   <script src="filetree.js"></script>
   <script src="termsearch.js"></script>
+  <script src="splitpanes.js"></script>
+  <script src="gitstatus.js"></script>
+  <script src="ollamahost.js"></script>
+  <script src="tabrestore.js"></script>
+  <script src="slashcmds.js"></script>
+  <script src="explainer.js"></script>
+  <script src="githelpers.js"></script>
+  <script src="copycode.js"></script>
   <script src="terminal.js"></script>
   <script src="renderer.js"></script>
 </body>

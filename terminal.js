@@ -65,6 +65,7 @@
     tabs: [],
     active: null,
     seq: 0,
+    inited: false, // set by init(): session saves are skipped before this
     early: new Map(), // output that arrives before its tab knows its id
     opts: {},
     view: 'chat',
@@ -72,6 +73,17 @@
     blocksHidden: false, // user hid the blocks rail; new commands won't re-show it
     search: { tab: null, query: '', resultIndex: -1, resultCount: 0 }, // the shared search bar belongs to one tab at a time
   };
+
+  // Thin wrappers over the split-panes module (window.PortalSplitPanes,
+  // loaded before this file). The fallbacks keep a lone tab working if
+  // the script tag is ever missing.
+  const spIsPartner = (t) => !!(window.PortalSplitPanes && window.PortalSplitPanes.isPartnerTab(t));
+  const spBarTab = (t) => (window.PortalSplitPanes ? window.PortalSplitPanes.barTab(t) : t);
+  const spVisible = (t) => (window.PortalSplitPanes ? window.PortalSplitPanes.visibleTabs(T.tabs, t) : [t]);
+  const spPrimary = (t) => (window.PortalSplitPanes ? window.PortalSplitPanes.primaryOf(t) : t);
+  const spFocusAfter = (tabs, closed, i) => (window.PortalSplitPanes
+    ? window.PortalSplitPanes.focusAfterClose(tabs, closed, i)
+    : (tabs.length ? tabs[Math.min(i, tabs.length - 1)] : null));
 
   const themeNow = () => THEMES[document.body.dataset.theme] || THEMES.dark;
   const save = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
@@ -109,8 +121,12 @@
   function renderTabs() {
     const bar = $('#term-tabs');
     bar.innerHTML = '';
+    // A split partner is a second pane, not a tab: it stays out of the
+    // bar, and its primary takes the highlight while it is focused.
+    const activeTab = spBarTab(T.active);
     for (const tab of T.tabs) {
-      const b = el('div', 'ttab' + (tab === T.active ? ' active' : ''));
+      if (spIsPartner(tab)) continue;
+      const b = el('div', 'ttab' + (tab === activeTab ? ' active' : ''));
       b.setAttribute('role', 'tab');
       const t = el('span', 'tt-title');
       t.textContent = tab.title;
@@ -124,7 +140,43 @@
       b.onclick = () => select(tab);
       bar.append(b);
     }
+    syncPaneClasses();
   }
+
+  // Pane geometry + focus frame + Split button label. Called from
+  // renderTabs, which select / closeTab / newTab / title changes all
+  // funnel through, so the classes can never go stale.
+  function syncPaneClasses() {
+    const split = !!(T.active && T.active.partner);
+    for (const t of T.tabs) {
+      t.pane.classList.toggle('split', !!t.partner);
+      t.pane.classList.toggle('split-left', !!t.partner && !t.splitPartner);
+      t.pane.classList.toggle('split-right', !!t.splitPartner);
+      t.pane.classList.toggle('focused', t === T.active);
+    }
+    const btn = $('#term-split');
+    if (btn) btn.textContent = split ? 'Unsplit' : 'Split';
+  }
+
+  // Bar tabs only (split partners excluded) with the cwd/shell each
+  // tab started with, and the active tab's index among them — the
+  // state the session file persists. Tabs whose cwd was never
+  // recorded are left out rather than saved as empty strings.
+  const sessionTabs = () => {
+    const bar = window.PortalTabRestore
+      ? window.PortalTabRestore.barTabs(T.tabs, spIsPartner)
+      : T.tabs.filter((t) => !spIsPartner(t));
+    return bar.filter((t) => t.cwd).map((t) => ({ cwd: t.cwd, shell: t.shell || '' }));
+  };
+  const sessionActiveIndex = () => (window.PortalTabRestore
+    ? window.PortalTabRestore.activeBarIndex(T.tabs, T.active, spIsPartner, spBarTab)
+    : T.tabs.filter((t) => !spIsPartner(t)).indexOf(spBarTab(T.active)));
+  // The renderer persists the session on every tab change (open,
+  // close, select) so a crash still restores — nothing is saved
+  // only on quit.
+  const sessionChanged = () => {
+    try { if (T.opts.onSessionChange) T.opts.onSessionChange(); } catch {}
+  };
 
   function select(tab) {
     nanoHide();
@@ -132,25 +184,40 @@
     // old tab's decorations) instead of showing a stale query/count.
     if (T.search.tab && T.search.tab !== tab) searchClose({ focus: false });
     T.active = tab;
-    for (const t of T.tabs) t.pane.hidden = t !== tab;
+    // A split tab's partner pane stays visible alongside it; every
+    // other tab's pane stays hidden.
+    const visible = spVisible(tab);
+    for (const t of T.tabs) t.pane.hidden = !visible.includes(t);
     renderTabs();
     renderBlocks();
-    requestAnimationFrame(() => { safeFit(tab); if (T.view !== 'chat') tab.term.focus(); });
+    requestAnimationFrame(() => { fitActive(); if (T.view !== 'chat') tab.term.focus(); });
+    sessionChanged();
   }
 
   function safeFit(tab) {
     if (!tab || !tab.pane.offsetWidth || !tab.pane.offsetHeight) return;
     try { tab.fit.fit(); } catch {}
   }
-  const fitActive = () => safeFit(T.active);
+  // A split tab's partner is visible too: a window resize re-fits both
+  // panes, not just the focused one.
+  const fitActive = () => {
+    if (!T.active) return;
+    safeFit(T.active);
+    if (T.active.partner) safeFit(T.active.partner);
+  };
   const focus = () => { if (T.active) T.active.term.focus(); };
 
-  async function newTab(cwd) {
+  // cwd: the directory the shell starts in (chat cwd by default).
+  // shell: the shell to spawn — empty means the configured default;
+  // a restore passes the shell the tab had. opts.silent keeps the
+  // current view (used by session restore: the user lands in chat
+  // view with their chat open, tabs waiting in the terminal).
+  async function newTab(cwd, shell, opts) {
     if (typeof Terminal === 'undefined' || typeof FitAddon === 'undefined' || typeof SearchAddon === 'undefined') {
       alert('The terminal library is missing. Run "npm install" in the app folder.');
       return null;
     }
-    if (T.view === 'chat') applyView('split');
+    if (T.view === 'chat' && !(opts && opts.silent)) applyView('split');
 
     // A new tab is a tab switch too: the shared bar closes rather than
     // searching a tab that is no longer active.
@@ -177,8 +244,17 @@
     const search = new SearchAddon.SearchAddon();
     term.loadAddon(search);
 
-    const tab = { n, pane, term, fit, search, id: null, title: 'Terminal ' + n, dead: false, blocks: [], current: null, inputBuf: '', inputStale: false, nanoFile: null, nano: { open: false, items: [], active: 0, prefix: '', force: false, justAccepted: false, pasteHide: false, timer: 0 }, shellIntegrated: false, markerAnchor: null, markerAnchorTimer: 0, markerStack: [], pendingCmd: '' };
+    const tab = { n, pane, term, fit, search, id: null, title: 'Terminal ' + n, dead: false, partner: null, splitPartner: false, blocks: [], current: null, inputBuf: '', inputStale: false, nanoFile: null, nano: { open: false, items: [], active: 0, prefix: '', force: false, justAccepted: false, pasteHide: false, timer: 0 }, shellIntegrated: false, markerAnchor: null, markerAnchorTimer: 0, markerStack: [], pendingCmd: '', cwd: cwd || (T.opts.getCwd && T.opts.getCwd()) || '', shell: '' };
     T.tabs.push(tab);
+    // Per-pane close button (shown only while the tab is split) and
+    // focus tracking: clicking a pane makes it the active tab, so the
+    // blocks rail, search, and Ask AI all follow the focused pane.
+    const spx = el('button', 'sp-close');
+    spx.textContent = '×';
+    spx.title = 'Close this pane';
+    spx.setAttribute('aria-label', 'Close this pane');
+    spx.onclick = (e) => { e.stopPropagation(); closeTab(tab); };
+    pane.append(spx);
     T.active = tab;
     // The count label follows this tab's addon, but only while the bar
     // belongs to this tab — another tab's search never rewrites it.
@@ -197,6 +273,13 @@
       renderTabs();
     });
     term.attachCustomKeyEventHandler((e) => keyHandler(tab, e));
+    // Focus follows the clicked pane. xterm 5.5 has no term.onFocus
+    // API (and no onBlur either — the pre-existing onBlur call below
+    // is dead code for the same reason), so this listens for focusin,
+    // which bubbles from the helper textarea up to the pane. The guard
+    // stops re-entry: select() focuses the tab's terminal, and an
+    // already-focused textarea does not re-fire focusin.
+    pane.addEventListener('focusin', () => { if (T.active !== tab) select(tab); });
     pane.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       if (term.hasSelection()) { copySelection(tab); term.clearSelection(); }
@@ -206,7 +289,8 @@
     const res = await window.api.termCreate({
       cols: term.cols,
       rows: term.rows,
-      cwd: cwd || (T.opts.getCwd && T.opts.getCwd()),
+      cwd: tab.cwd || (T.opts.getCwd && T.opts.getCwd()),
+      shell: shell || '',
     });
     // The tab may have been closed while creation was in flight — kill the
     // orphaned pty instead of attaching it to a dead tab.
@@ -217,9 +301,11 @@
     if (res.error) {
       term.write('\r\n' + res.error + '\r\n');
       tab.dead = true;
+      sessionChanged();
       return tab;
     }
     tab.id = res.id;
+    tab.shell = (res && res.shell) || '';
     term.onData((d) => window.api.termWrite(tab.id, d));
     term.onData((d) => trackInput(tab, d));
     term.onResize(({ cols, rows }) => { window.api.termResize(tab.id, cols, rows); nanoHide(tab); });
@@ -230,7 +316,31 @@
     // make sure the shell knows the final size
     window.api.termResize(tab.id, term.cols, term.rows);
     if (T.view !== 'chat') term.focus();
+    sessionChanged();
     return tab;
+  }
+
+  // Recreate the saved session's tabs after a restart, silently: the
+  // user stays in chat view and the tabs are waiting in the terminal.
+  // Split state is not restored (partners were never saved). A tab
+  // whose shell fails to spawn is closed instead of left dead in the
+  // bar. Returns the tabs that came back.
+  async function restoreTabs(tabs, activeIndex) {
+    if (!Array.isArray(tabs) || !tabs.length) return [];
+    const created = [];
+    for (const t of tabs) {
+      if (!t || typeof t.cwd !== 'string') continue;
+      const tab = await newTab(t.cwd, t.shell || '', { silent: true });
+      if (!tab) continue;
+      if (tab.dead) { closeTab(tab); continue; }
+      created.push(tab);
+    }
+    if (created.length) {
+      const i = Math.max(0, Math.min(Number.isInteger(activeIndex) ? activeIndex : 0, created.length - 1));
+      select(created[i]);
+    }
+    sessionChanged();
+    return created;
   }
 
   function closeTab(tab) {
@@ -242,9 +352,20 @@
     tab.pane.remove();
     const i = T.tabs.indexOf(tab);
     if (i >= 0) T.tabs.splice(i, 1);
+    // Closing one side of a split leaves the survivor as a normal
+    // standalone tab (no field copying — the survivor keeps its own
+    // pty, blocks, and search state untouched).
+    const partner = tab.partner || null;
+    if (partner) {
+      partner.partner = null;
+      partner.splitPartner = false;
+    }
     if (T.active === tab) {
       T.active = null;
-      if (T.tabs.length) select(T.tabs[Math.min(i, T.tabs.length - 1)]);
+      // A split close focuses the survivor; otherwise the neighbour
+      // the old logic picked (next tab, or the last one at the end).
+      const next = spFocusAfter(T.tabs, tab, i);
+      if (next) select(next);
     }
     renderBlocks();
     updateBlocksToggle();
@@ -253,6 +374,78 @@
       if (T.view === 'term') newTab();
       else setView('chat');
     }
+    sessionChanged();
+  }
+
+  /* ---------- split panes ----------
+   * The second pane is a full tab (own pty, own search addon, own
+   * blocks), linked by tab.partner and hidden from the tab bar. See
+   * design-plans/split-panes-plan.md for why a partner tab beats a
+   * pane object. */
+
+  async function splitTab(tab) {
+    tab = tab || T.active;
+    // A double-click fires splitTab twice: the first call is still
+    // awaiting newTab when the second lands, and tab.partner is not
+    // set yet — without this flag the second call would spawn a second
+    // partner and orphan the first (invisible, unreachable, pty alive).
+    if (!tab || tab.partner || tab.dead || tab._splitting) return null;
+    tab._splitting = true;
+    try {
+      const partner = await newTab();
+      if (!partner) return null;
+      // A pty that failed to spawn leaves a dead tab behind; clean it up
+      // instead of showing a dead second pane.
+      if (partner.dead) { closeTab(partner); return null; }
+      tab.partner = partner;
+      partner.partner = tab;
+      partner.splitPartner = true;
+      // newTab hid the primary pane and made the partner active; show both.
+      // renderTabs re-runs here (not just syncPaneClasses): newTab's
+      // renderTabs ran before the link existed, so the bar still lists
+      // the partner as a normal tab until this refreshes it.
+      tab.pane.hidden = false;
+      partner.pane.hidden = false;
+      renderTabs();
+      renderBlocks();
+      requestAnimationFrame(() => { fitActive(); partner.term.focus(); });
+      // newTab's session save ran before the link existed, so it saved
+      // the partner as a normal tab — save again now that the partner
+      // is marked and the bar-tab list is correct.
+      sessionChanged();
+      return partner;
+    } finally {
+      tab._splitting = false;
+    }
+  }
+
+  function unsplitTab(tab) {
+    tab = tab || T.active;
+    if (!tab) return;
+    // Unsplit always removes the partner pane: the primary (the tab
+    // in the tab bar) is the survivor, whichever side is focused.
+    // Closing tab.partner blindly would close the primary when the
+    // partner pane is focused, silently swapping which tab survives.
+    const primary = spPrimary(tab);
+    if (!primary || !primary.partner) return;
+    closeTab(primary.partner);
+  }
+
+  function splitToggle() {
+    // A split is still in flight (the partner tab is being created):
+    // ignore the toggle until it lands. Without this, a double-click
+    // splits twice — the second click reads T.active after newTab
+    // already made the half-created partner active, so it splits the
+    // partner as well and leaves three panes with crossed links.
+    if (T.tabs.some((t) => t._splitting)) return;
+    const tab = T.active;
+    if (!tab) { newTab().then(() => splitToggle()); return; }
+    if (tab.partner) unsplitTab(tab);
+    else splitTab(tab);
+  }
+
+  function isSplit() {
+    return !!(T.active && T.active.partner);
   }
 
   /* ---------- keys, clipboard ---------- */
@@ -435,6 +628,24 @@
     if (text.trim() && T.opts.onAsk) T.opts.onAsk(text.trimEnd());
   }
 
+  // The last terminal block of the focused pane + the recent buffer
+  // tail as its output, for /explain. Blocks store command + exit
+  // code + duration but no output text, so the output is the tail of
+  // the buffer (the askAi precedent). Null when there is no tab or
+  // no block yet — the caller says so instead of sending an empty
+  // explanation.
+  function lastBlockOutput() {
+    const tab = T.active;
+    if (!tab || !tab.blocks.length) return null;
+    const b = tab.blocks[tab.blocks.length - 1];
+    return {
+      command: b.command,
+      exitCode: typeof b.exitCode === 'number' ? b.exitCode : null,
+      status: b.status,
+      output: bufferTail(tab.term, 30),
+    };
+  }
+
   /* ---------- command blocks (Warp-style) ----------
    * xterm renders to canvas, so blocks live in a DOM rail above the
    * terminal instead of inline. Each submitted command becomes a block
@@ -610,7 +821,15 @@
         if (refined) return; refined = true;
         if (!tab.markerStack.includes(block)) return; // already finished
         const text = commandFromAnchor(tab);
-        if (text && text !== block.command) {
+        // The anchor is captured lazily after the prompt flushes, so a
+        // fast typist can move the cursor past the prompt end before it
+        // fires — the slice then starts inside the command (a typed
+        // `ls /nope` records as `/nope`). The E marker comes from the
+        // shell, so the true command always contains it: only accept
+        // an anchor reading that contains the E command, otherwise
+        // keep E. No E yet (block.command is '(command)') → accept.
+        const e = block.command;
+        if (text && text !== e && (e === '(command)' || text.includes(e))) {
           block.command = text;
           if (tab === T.active) renderBlocks();
         }
@@ -681,6 +900,18 @@
       rerun.title = 'Run this command again';
       rerun.onclick = () => { tab.term.focus(); tab.term.paste(b.command + '\r'); };
       row.append(cmd, status, copy, rerun);
+      // Failed blocks only (done, non-zero exit): one click asks the
+      // agent to explain the failure and propose a fix. Running,
+      // cancelled, and tracker blocks without an exit code get none.
+      if (b.status === 'done' && b.exitCode) {
+        const explain = el('button', 'tb-btn');
+        explain.textContent = 'Explain';
+        explain.title = 'Ask the agent to explain this failure and propose a fix';
+        explain.onclick = () => {
+          if (T.opts.onExplain) T.opts.onExplain({ command: b.command, exitCode: b.exitCode, status: b.status, output: bufferTail(tab.term, 30) });
+        };
+        row.append(explain);
+      }
       box.append(row);
     }
     box.scrollTop = box.scrollHeight;
@@ -979,14 +1210,16 @@
 
   /* ---------- init ---------- */
 
-  function init(opts) {
+  async function init(opts) {
     T.opts = opts || {};
     T.opts.nanoComplete = T.opts.nanoComplete !== false;
+    T.inited = true;
     T.fontSize = Number(T.opts.fontSize) || 13;
     T.fontFamily = T.opts.fontFamily || MONO;
 
     document.querySelectorAll('#top .seg button').forEach((b) => (b.onclick = () => setView(b.dataset.view)));
     $('#term-new').onclick = () => newTab();
+    $('#term-split').onclick = () => splitToggle();
     $('#term-search-btn').onclick = () => { if (T.active) searchOpen(T.active); };
     const sInput = $('#term-search-input');
     sInput.addEventListener('input', () => searchRun('next', true));
@@ -1079,6 +1312,12 @@
       else if (mod && e.shiftKey && k === 't') { e.preventDefault(); newTab(); }
     });
 
+    // Restore saved tabs BEFORE the saved view is applied: setView
+    // creates a tab when the view is term/split and no tabs exist, so
+    // restoring after it would leave an extra tab behind (and save it).
+    if (opts.initialTabs && opts.initialTabs.length) {
+      await restoreTabs(opts.initialTabs, opts.initialActiveTab);
+    }
     const saved = load('view');
     setView(saved === 'split' || saved === 'term' ? saved : 'chat');
   }
@@ -1086,6 +1325,6 @@
   // _nano is a test hook (headless harness + launch test drive the popup
   // through it); it is not part of the app's UI surface. _blocks is the
   // same for the shell-integration marker path. _search is the same for
-  // the terminal search bar.
-  window.TermUI = { init, setView, toggle, newTab, sendText, updateTheme, setFont, setFontFamily, askAi, focus, setNanoComplete, _nano: { parseNanoCommand, rankSuggestions, wordBeforeCursor, nanoActive, extOf, getActiveTab: () => T.active, refresh: nanoRefresh, accept: nanoAccept, hide: nanoHide, schedule: nanoSchedule }, _blocks: { onOsc, commandFromAnchor, getActiveTab: () => T.active }, _search: { open: searchOpen, close: searchClose, run: searchRun, getState: () => ({ open: !!T.search.tab, tab: T.search.tab ? T.search.tab.n : null, query: T.search.query, resultIndex: T.search.resultIndex, resultCount: T.search.resultCount }), getActiveTab: () => T.active } };
+  // the terminal search bar. _split is the same for split panes.
+  window.TermUI = { init, setView, toggle, newTab, sendText, updateTheme, setFont, setFontFamily, askAi, focus, setNanoComplete, _session: { getTabs: sessionTabs, getActiveIndex: sessionActiveIndex, getState: () => ({ tabs: sessionTabs(), activeTab: sessionActiveIndex() }), restoreTabs, isReady: () => !!T.inited }, _nano: { parseNanoCommand, rankSuggestions, wordBeforeCursor, nanoActive, extOf, getActiveTab: () => T.active, refresh: nanoRefresh, accept: nanoAccept, hide: nanoHide, schedule: nanoSchedule }, _blocks: { onOsc, commandFromAnchor, getActiveTab: () => T.active, lastBlockOutput, render: renderBlocks }, _search: { open: searchOpen, close: searchClose, run: searchRun, getState: () => ({ open: !!T.search.tab, tab: T.search.tab ? T.search.tab.n : null, query: T.search.query, resultIndex: T.search.resultIndex, resultCount: T.search.resultCount }), getActiveTab: () => T.active }, _split: { split: splitToggle, splitTab, unsplit: unsplitTab, isSplit, getState: () => ({ split: isSplit(), active: T.active ? T.active.n : null, partner: T.active && T.active.partner ? T.active.partner.n : null, panes: T.active ? spVisible(T.active).length : 0 }), getActiveTab: () => T.active, getPartnerTab: () => (T.active && T.active.partner) || null } };
 })();

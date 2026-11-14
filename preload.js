@@ -1,7 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 const inv = (channel, ...args) => ipcRenderer.invoke(channel, ...args);
-const EVENTS = ['stream', 'message', 'approval', 'running', 'done', 'error', 'chat-updated', 'auto', 'term-data', 'term-exit', 'term-osc', 'ollama:pull-progress'];
+const EVENTS = ['stream', 'message', 'approval', 'running', 'done', 'error', 'chat-updated', 'auto', 'term-data', 'term-exit', 'term-osc', 'ollama:pull-progress', 'context', 'fallback'];
 
 contextBridge.exposeInMainWorld('api', {
   getSettings: () => inv('settings:get'),
@@ -35,6 +35,11 @@ contextBridge.exposeInMainWorld('api', {
   readFileText: (p) => inv('file:readText', p),
   listFiles: (chatId, relPath) => inv('files:list', chatId, relPath),
   readFile: (chatId, relPath) => inv('files:read', chatId, relPath),
+  gitStatus: (chatId) => inv('git:status', chatId),
+  gitDiff: (chatId) => inv('git:diff', chatId),
+  gitPr: (chatId, number) => inv('git:pr', chatId, number),
+  getSession: () => inv('session:get'),
+  saveSession: (state) => inv('session:set', state),
   termCreate: (opts) => inv('term:create', opts),
   termWrite: (id, data) => ipcRenderer.send('term:write', id, data),
   termResize: (id, cols, rows) => ipcRenderer.send('term:resize', id, cols, rows),

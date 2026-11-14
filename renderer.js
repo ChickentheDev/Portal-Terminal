@@ -25,6 +25,8 @@
     stick: true,
     status: { ok: false, models: [] },
     agents: [], // known agent models (Hermes first) from main
+    lastAnswerModel: null, // model that answered the last turn (a fallback, when one did)
+    lastModelSeen: null, // configured model at the last pollStatus
   };
 
   const suggestions = [
@@ -690,13 +692,14 @@
     inputEl.placeholder = running ? 'Working… press Stop to interrupt' : 'Ask for something to be done';
   }
 
-  async function sendMessage() {
+  async function sendMessage(textOverride) {
     if (!S.cur) return;
     if (isRunning()) { await window.api.stop(S.cur.id); return; }
-    const text = inputEl.value.trim();
+    const text = (typeof textOverride === 'string' ? textOverride : inputEl.value).trim();
     if (!text) return;
     inputEl.value = '';
     autosize();
+    closeSlash();
     S.running.add(S.cur.id);
     updateComposer();
     S.stick = true;
@@ -705,16 +708,235 @@
     if (!ok) { S.running.delete(S.cur.id); updateComposer(); setWorking(false); }
   }
 
+  /* ---------- slash commands ---------- */
+
+  // One shared popup, appended to .composer-box and positioned above
+  // the textarea (the nanoPopupEl precedent). Labels are textContent
+  // only — a hostile snippet name can never inject markup.
+  const SLASH = { open: false, items: [], active: 0, query: '' };
+  let slashEl = null;
+  function slashPopupEl() {
+    if (!slashEl) {
+      slashEl = el('div', 'slash-popup');
+      slashEl.hidden = true;
+      document.querySelector('.composer-box').append(slashEl);
+    }
+    return slashEl;
+  }
+  function slashCommands() {
+    const u = window.PortalSlashCmds;
+    if (!u) return [];
+    return u.filterCommands(SLASH.query, (S.settings && S.settings.snippets) || []);
+  }
+  function slashRender() {
+    const box = slashPopupEl();
+    box.innerHTML = '';
+    if (!SLASH.items.length) {
+      box.append(el('div', 'slash-empty', 'No matching command.'));
+    } else {
+      SLASH.items.forEach((c, i) => {
+        const row = el('button', 'slash-item' + (i === SLASH.active ? ' active' : ''));
+        row.type = 'button';
+        const n = el('span', 'slash-name');
+        n.textContent = '/' + c.name;
+        const d = el('span', 'slash-desc');
+        d.textContent = c.description;
+        row.append(n, d);
+        // mousedown (not click) + preventDefault: clicking must not
+        // blur the input before the accept lands (nano precedent).
+        row.onmousedown = (e) => { e.preventDefault(); slashAccept(i); };
+        box.append(row);
+      });
+    }
+    box.hidden = false;
+  }
+  function closeSlash() {
+    SLASH.open = false;
+    SLASH.items = [];
+    if (slashEl) slashEl.hidden = true;
+  }
+  const slashIsOpen = () => SLASH.open;
+  // Re-filter on every input event. Opens only while the text is a
+  // bare slash query; a space after the name or any other text closes
+  // — except `/pr <number>`, the one command that takes an argument:
+  // while digits follow, the popup stays open with the /pr item.
+  function slashOnInput() {
+    const u = window.PortalSlashCmds;
+    if (!u) return;
+    const g = window.PortalGitHelpers;
+    if (g) {
+      const pr = g.parsePrCommand(inputEl.value);
+      if (pr) {
+        SLASH.query = 'pr';
+        SLASH.items = [{ name: 'pr', description: 'Summarize pull request #' + pr.number, builtin: true, snippet: null, prNumber: pr.number }];
+        SLASH.active = 0;
+        SLASH.open = true;
+        slashRender();
+        return;
+      }
+    }
+    const q = u.parseSlashPrefix(inputEl.value);
+    if (q == null) { closeSlash(); return; }
+    SLASH.query = q;
+    SLASH.items = slashCommands();
+    SLASH.active = 0;
+    SLASH.open = true;
+    slashRender();
+  }
+
+  // The composer hint doubles as the refusal channel: no context
+  // means no turn, and the reason flashes here for a few seconds
+  // instead of polluting the chat history with an empty review.
+  const HINT_DEFAULT = 'Enter to send, Shift+Enter for a new line. Commands run on this computer.';
+  let hintTimer = 0;
+  function flashHint(text) {
+    const hint = document.querySelector('#composer .hint');
+    if (!hint) return;
+    hint.textContent = text;
+    clearTimeout(hintTimer);
+    hintTimer = setTimeout(() => { hint.textContent = HINT_DEFAULT; }, 4000);
+  }
+  // Put the hint back to the default now (not in 4 s): the /pr fetch
+  // flashes "Fetching…" while it runs, and a slow fetch can outlive
+  // the turn it was fetching for.
+  function resetHint() {
+    const hint = document.querySelector('#composer .hint');
+    if (!hint) return;
+    clearTimeout(hintTimer);
+    hint.textContent = HINT_DEFAULT;
+  }
+
+  // Copy the last fenced code block the agent produced in this chat:
+  // raw contents, no fences. The module reads the rendered DOM, so
+  // only agent messages count (user messages are plain text, file and
+  // command cards are not .cb blocks). No block yet means no copy —
+  // the reason flashes in the composer hint instead.
+  async function copyLastCodeBlock() {
+    const u = window.PortalCopyCode;
+    const block = u ? u.findLastCodeBlock(messagesEl) : null;
+    if (!block) { flashHint('No code block to copy.'); return; }
+    await copyText(block.code);
+    flashHint(u.copiedHint(block));
+  }
+
+  // One git:diff fetch shared by /review, /commit-msg, and snippets
+  // with a {diff} placeholder. Returns the diff (or { empty: true }
+  // when there is nothing to attach); null when the command must not
+  // fire — the hint already says why.
+  async function fetchDiffForCommand() {
+    let r;
+    try { r = await window.api.gitDiff(S.cur.id); } catch { flashHint('Could not read the diff.'); return null; }
+    if (!r || !r.ok) { flashHint((r && r.error) || 'Could not read the diff.'); return null; }
+    if (!r.isRepo) { flashHint('This chat\'s directory is not a git repo.'); return null; }
+    const diff = String(r.diff || '');
+    const untracked = Array.isArray(r.untracked) ? r.untracked : [];
+    if (!diff.trim() && !untracked.length) return { empty: true, diff: '', untracked, untrackedTruncated: false };
+    return { diff, untracked, untrackedTruncated: !!r.untrackedTruncated };
+  }
+  async function expandDiffCommand(name) {
+    const u = window.PortalSlashCmds;
+    const d = await fetchDiffForCommand();
+    if (!d) return null;
+    if (d.empty) {
+      flashHint(name === 'review' ? 'No uncommitted changes — nothing to review.' : 'No uncommitted changes — nothing to write a message for.');
+      return null;
+    }
+    return name === 'review' ? u.buildReviewMessage(d.diff, d) : u.buildCommitMessage(d.diff, d);
+  }
+  function expandExplainCommand() {
+    const u = window.PortalSlashCmds;
+    const last = window.TermUI && window.TermUI._blocks && window.TermUI._blocks.lastBlockOutput
+      ? window.TermUI._blocks.lastBlockOutput() : null;
+    if (!last) { flashHint('No terminal command has run yet — nothing to explain.'); return null; }
+    return u.buildExplainMessage(last);
+  }
+  async function expandSnippetCommand(snippet) {
+    const u = window.PortalSlashCmds;
+    if (!String(snippet.prompt || '').includes('{diff}')) return String(snippet.prompt);
+    const d = await fetchDiffForCommand();
+    if (!d) return null;
+    if (d.empty) { flashHint('No uncommitted changes — nothing for the snippet to review.'); return null; }
+    return u.expandSnippet(snippet.prompt, d.diff, d);
+  }
+  // /changelog: same diff gathering as /review and /commit-msg, but
+  // the turn asks for a CHANGELOG entry as copyable text — it never
+  // writes CHANGELOG.md.
+  async function expandChangelogCommand() {
+    const g = window.PortalGitHelpers;
+    if (!g) return null;
+    const d = await fetchDiffForCommand();
+    if (!d) return null;
+    if (d.empty) { flashHint('No uncommitted changes — nothing to draft a changelog entry for.'); return null; }
+    return g.buildChangelogMessage(d.diff, d);
+  }
+  // /pr <number>: fetch the PR in main (gh CLI, else the public
+  // GitHub API) and build the summary turn. The hint says the fetch
+  // is running — it can take a few seconds on a slow network.
+  async function expandPrCommand(number) {
+    const g = window.PortalGitHelpers;
+    if (!g || !S.cur) return null;
+    flashHint('Fetching pull request #' + number + '…');
+    let r;
+    try { r = await window.api.gitPr(S.cur.id, number); } catch { flashHint('Could not fetch pull request #' + number + '.'); return null; }
+    if (!r || !r.ok) { flashHint((r && r.error) || 'Could not fetch pull request #' + number + '.'); return null; }
+    resetHint();
+    return g.buildPrSummaryMessage(r.pr);
+  }
+  // Expansion happens ONLY through the popup accept — typing the
+  // command and pressing Enter with the popup dismissed sends the
+  // literal text. Accepting while a turn is running does nothing.
+  async function slashAccept(idx) {
+    const item = SLASH.items[idx];
+    const u = window.PortalSlashCmds;
+    if (!item || !u || !S.cur) return;
+    if (isRunning()) { flashHint('Wait for the current turn to finish.'); closeSlash(); return; }
+    closeSlash();
+    inputEl.value = '';
+    autosize();
+    let text = null;
+    if (item.builtin && item.name === 'review') text = await expandDiffCommand('review');
+    else if (item.builtin && item.name === 'commit-msg') text = await expandDiffCommand('commit-msg');
+    else if (item.builtin && item.name === 'explain') text = expandExplainCommand();
+    else if (item.builtin && item.name === 'changelog') text = await expandChangelogCommand();
+    else if (item.builtin && item.name === 'pr') {
+      if (typeof item.prNumber === 'number') text = await expandPrCommand(item.prNumber);
+      else flashHint('Type the PR number: /pr 12.');
+    }
+    else if (item.snippet) text = await expandSnippetCommand(item.snippet);
+    if (text == null) return;
+    // The expanders await a fetch (git:diff, git:pr), and the user
+    // can start a turn while one is in flight. sendMessage would
+    // STOP that turn — so re-check here and drop the text instead.
+    if (isRunning()) { flashHint('Wait for the current turn to finish.'); return; }
+    sendMessage(text);
+  }
+
   /* ---------- chats ---------- */
 
   function renderHeader() {
     titleEl.value = S.cur.title;
-    const cwd = $('#cwd');
-    cwd.textContent = shortPath(S.cur.cwd);
-    cwd.title = (S.cur.cwd || '') + '\nClick to change the working directory';
+    $('#cwd-path').textContent = shortPath(S.cur.cwd);
+    $('#cwd').title = (S.cur.cwd || '') + '\nClick to change the working directory';
     const fc = $('#files-cwd');
     fc.textContent = shortPath(S.cur.cwd);
     fc.title = S.cur.cwd || '';
+    refreshGitStatus();
+  }
+  // Git label for the cwd chip. A sequence number discards stale
+  // replies: switching chats while a slow `git status` is in flight
+  // cannot paint the old chat's branch onto the new chat's chip.
+  let gitSeq = 0;
+  async function refreshGitStatus() {
+    const el = $('#cwd-git');
+    if (!S.cur) { el.textContent = ''; return; }
+    const my = ++gitSeq;
+    const id = S.cur.id;
+    let r;
+    try { r = await window.api.gitStatus(id); } catch { return; }
+    if (my !== gitSeq || !S.cur || S.cur.id !== id) return;
+    const label = window.PortalGitStatus.formatGitLabel(r && r.ok ? r : null);
+    el.textContent = label.text ? ' \u00B7 ' + label.text : '';
+    $('#cwd').title = (S.cur.cwd || '') + (label.title ? '\n' + label.title : '') + '\nClick to change the working directory';
   }
   function renderAuto() {
     const a = $('#auto');
@@ -725,6 +947,7 @@
   async function openChat(id) {
     const r = await window.api.getChat(id);
     if (!r || !r.chat) { await startNewChat(true); return; }
+    closeSlash();
     S.cur = r.chat;
     renderHeader();
     renderAll();
@@ -734,6 +957,25 @@
     refreshFileTree();
     if (window.innerWidth <= 820) $('#sidebar').classList.add('hidden');
     inputEl.focus();
+    saveSessionNow();
+  }
+
+  // Persist the restore state (active chat + terminal tabs) on every
+  // change that matters, not only on quit — a crash must restore too.
+  // Skipped before TermUI is initialized (openChat during startup
+  // restore runs before init): saving then would overwrite the saved
+  // tabs with an empty list. Guarded for harness stubs without the
+  // session API.
+  function saveSessionNow() {
+    if (!S.cur || !window.api.saveSession || !window.PortalTabRestore) return;
+    if (!window.TermUI || !window.TermUI._session || !window.TermUI._session.isReady()) return;
+    const s = window.PortalTabRestore.buildSession(
+      S.cur.id,
+      window.TermUI._session.getTabs(),
+      window.TermUI._session.getActiveIndex()
+    );
+    if (!s) return;
+    try { const p = window.api.saveSession(s); if (p && p.catch) p.catch(() => {}); } catch {}
   }
 
   async function startNewChat(force) {
@@ -766,7 +1008,7 @@
       removeEmpty();
       appendMessage(m);
       // An agent write/edit that applied changes the cwd contents.
-      if (m.meta && m.meta.kind === 'file' && m.meta.status === 'applied') refreshFileTree();
+      if (m.meta && m.meta.kind === 'file' && m.meta.status === 'applied') { refreshFileTree(); refreshGitStatus(); }
       if (S.running.has(S.cur.id)) setWorking(true);
       scrollDown();
     });
@@ -774,6 +1016,23 @@
     on('approval', (p) => {
       if (!S.cur || p.chatId !== S.cur.id) return;
       showApproval(p);
+    });
+
+    // Project context for this turn: a collapsible line under the user
+    // message, showing what the agent was told about the project.
+    // The snapshot text is inserted as text, never HTML.
+    on('context', (p) => {
+      if (!S.cur || p.chatId !== S.cur.id) return;
+      const d = document.createElement('details');
+      d.className = 'ctx-line';
+      const sum = document.createElement('summary');
+      sum.textContent = 'Project context — ' + (p.summary || '');
+      const pre = document.createElement('pre');
+      pre.className = 'ctx-text';
+      pre.textContent = p.text || '';
+      d.append(sum, pre);
+      messagesEl.append(d);
+      scrollDown();
     });
 
     on('running', (p) => {
@@ -796,8 +1055,28 @@
       scrollDown();
     });
 
+    // The agent model failed mid-turn and the next model in the
+    // fallback chain is answering instead. The failed attempt's
+    // partial bubble is discarded first, so the fallback's reply
+    // streams into a fresh bubble. Text only — a hostile model
+    // name renders as text.
+    on('fallback', (p) => {
+      if (!S.cur || p.chatId !== S.cur.id) return;
+      clearStream();
+      const d = el('div', 'fb-line');
+      let text = `${p.from || 'The agent model'} failed${p.reason ? ` (${p.reason})` : ''} — retrying with ${p.to || 'the next model'}`;
+      if (Array.isArray(p.skipped) && p.skipped.length) text += ` (skipped ${p.skipped.join(', ')} — not installed)`;
+      d.textContent = text;
+      messagesEl.append(d);
+      scrollDown();
+    });
+
     on('done', (p) => {
       S.running.delete(p.chatId);
+      // Which model actually answered this turn (the fallback model,
+      // when one did). The sidebar chip shows it until the primary
+      // answers a turn again or the configured model changes.
+      if (p.model) S.lastAnswerModel = p.model;
       if (S.cur && p.chatId === S.cur.id) {
         setWorking(false);
         clearStream();
@@ -854,11 +1133,16 @@
     $('#s-chatfont').value = s.chatFont || 15;
     $('#s-dir').value = s.startDir;
     $('#s-instr').value = s.instructions;
+    renderSnippetRows(s.snippets || []);
     $('#s-termfont').value = s.termFont;
     $('#s-shell').value = s.shell || '';
     $('#s-nano').checked = s.nanoComplete !== false;
     $('#s-shellint').checked = s.shellIntegration !== false;
+    $('#s-projctx').checked = s.projectContext !== false;
+    $('#s-fallback-enabled').checked = s.fallbackEnabled !== false;
+    fallbackDraft = null; // rebuilt from the installed models on refresh
     $('#s-autoollama').value = s.autoOllama === false ? 'no' : 'yes';
+    syncHostUi();
     refreshModelList();
     refreshModels();
     $('#modal').hidden = false;
@@ -866,9 +1150,64 @@
   }
   const closeSettings = () => ($('#modal').hidden = true);
 
+  // "Start Ollama automatically" only works for a local Ollama — it
+  // is a no-op for a remote host in main, so the control is disabled
+  // while the address field holds a remote host. The saved value is
+  // untouched; it applies again if the host comes back to local.
+  function syncHostUi() {
+    const u = window.PortalOllamaHost;
+    const sel = $('#s-autoollama');
+    if (!u) { sel.disabled = false; sel.title = ''; return; }
+    const remote = !u.isLocalHost($('#s-host').value);
+    sel.disabled = remote;
+    sel.title = remote ? 'Auto-start only works for a local Ollama — this host is on another machine.' : '';
+  }
+
+  // The host field applies live when it loses focus after editing:
+  // a valid new host saves, rewrites the field to its normalized
+  // form, and refreshes the status dot and the model list in place
+  // (the list below the field is that host's models). An invalid
+  // host is refused with an inline error and the field reverts.
+  async function applyHostField() {
+    const u = window.PortalOllamaHost;
+    if (!u) return;
+    const field = $('#s-host');
+    const v = u.normalizeHost(field.value);
+    if (!v.ok) {
+      $('#s-models-status').textContent = v.error;
+      field.value = S.settings.host;
+      syncHostUi();
+      return;
+    }
+    if (v.host === S.settings.host) {
+      field.value = v.host;
+      syncHostUi();
+      return;
+    }
+    S.settings = await window.api.setSettings({ host: v.host });
+    field.value = S.settings.host;
+    syncHostUi();
+    await pollStatus();
+    // The host may have changed again while this apply was awaiting
+    // its status poll — the newer apply owns the list and the status
+    // line now, so stop here instead of refreshing over its work
+    // (a stale refresh would clear the newer apply's note).
+    if (S.settings.host !== v.host) return;
+    refreshModelList();
+    await refreshModels();
+    // The host may have changed again while this apply was awaiting
+    // its refreshes — the newer apply owns the status line then.
+    if (S.settings.host !== v.host) return;
+    $('#s-models-status').textContent = modelsCache !== null
+      ? `Ollama host is now ${S.settings.host}.`
+      : u.offlineMessage(S.settings.host);
+  }
+
   /* ---------- model manager ---------- */
 
   let modelsCache = null; // last ollama:models result, or null while unloaded
+  let modelsSeq = 0; // a newer refresh supersedes an older in-flight one
+  let fallbackDraft = null; // [{ name, enabled }] as shown in the modal; null until the modal opens
 
   function modelRow(m) {
     const u = window.PortalModels;
@@ -922,6 +1261,7 @@
   }
 
   async function refreshModels() {
+    const seq = ++modelsSeq;
     const list = $('#s-models-list');
     const status = $('#s-models-status');
     const pullBtn = $('#s-models-pull');
@@ -931,6 +1271,7 @@
     if (!window.PortalModels) {
       status.textContent = 'Model helpers failed to load — restart the app.';
       pullBtn.disabled = true;
+      renderFallbackList();
       return;
     }
     // Populate the pull preset select once, from the agent presets.
@@ -946,20 +1287,133 @@
     status.textContent = 'Loading models…';
     let r;
     try { r = await window.api.listModels(); } catch { r = { ok: false }; }
+    // A host change while this fetch was in flight starts a newer
+    // refresh; the older reply must not overwrite the newer list.
+    // (A remote host answers in tens of milliseconds, so this race
+    // is real there even though loopback never triggers it.)
+    if (seq !== modelsSeq) return;
     if (!r || !r.ok) {
       modelsCache = null;
-      status.textContent = 'Ollama is offline — start it with ollama serve.';
+      status.textContent = window.PortalOllamaHost
+        ? window.PortalOllamaHost.offlineMessage(S.settings.host)
+        : 'Ollama is offline — start it with ollama serve.';
       pullBtn.disabled = true;
+      renderFallbackList();
       return;
     }
     modelsCache = r.models || [];
     pullBtn.disabled = false;
     if (!modelsCache.length) {
       status.textContent = 'No models installed yet — pull one below.';
+      renderFallbackList();
       return;
     }
     status.textContent = '';
     for (const m of modelsCache) list.append(modelRow(m));
+    renderFallbackList();
+  }
+
+  // --- fallback chain (Settings → Models) ---
+  // The auto chain for a primary: installed models minus the primary,
+  // smallest first (same order the turn-time chain uses).
+  function autoFallbackNames(primary) {
+    const p = String(primary || '').trim().toLowerCase();
+    return (modelsCache || [])
+      .filter((m) => String(m.name || '').trim().toLowerCase() !== p)
+      .slice()
+      .sort((a, b) => ((Number(a.size) > 0 ? Number(a.size) : Infinity) - (Number(b.size) > 0 ? Number(b.size) : Infinity)) || String(a.name).localeCompare(String(b.name)))
+      .map((m) => m.name);
+  }
+
+  // Build the draft once per Settings open: explicit names first (in
+  // order, checked), then installed models not in the explicit list
+  // (unchecked, size order). In auto mode every installed model is
+  // checked. Explicit names that are no longer installed stay in the
+  // draft so the user can see and remove them.
+  function buildFallbackDraft() {
+    const primary = ($('#s-model').value || S.settings.model || '').trim().toLowerCase();
+    const installed = modelsCache || [];
+    const draft = [];
+    const seen = new Set();
+    const explicit = Array.isArray(S.settings.fallback) ? S.settings.fallback : null;
+    if (explicit) {
+      for (const raw of explicit) {
+        const name = String(raw || '').trim();
+        if (!name || seen.has(name.toLowerCase()) || name.toLowerCase() === primary) continue;
+        seen.add(name.toLowerCase());
+        draft.push({ name, enabled: true });
+      }
+    }
+    const rest = installed
+      .filter((m) => !seen.has(String(m.name).toLowerCase()) && String(m.name).toLowerCase() !== primary)
+      .slice()
+      .sort((a, b) => ((Number(a.size) > 0 ? Number(a.size) : Infinity) - (Number(b.size) > 0 ? Number(b.size) : Infinity)) || String(a.name).localeCompare(String(b.name)));
+    for (const m of rest) draft.push({ name: m.name, enabled: !explicit });
+    return draft;
+  }
+
+  function renderFallbackList() {
+    const u = window.PortalFallback;
+    const list = $('#s-fallback-list');
+    const status = $('#s-fallback-status');
+    if (!list) return;
+    if (!u) { status.textContent = 'Fallback helpers failed to load — restart the app.'; return; }
+    if (!modelsCache) {
+      list.innerHTML = '';
+      status.textContent = 'Ollama is offline — the fallback list loads when models do.';
+      return;
+    }
+    if (fallbackDraft === null) fallbackDraft = buildFallbackDraft();
+    const enabled = $('#s-fallback-enabled').checked;
+    list.innerHTML = '';
+    status.textContent = '';
+    if (!fallbackDraft.length) {
+      status.textContent = 'No other models installed — pull one to have a fallback.';
+      return;
+    }
+    fallbackDraft.forEach((row, i) => {
+      const m = (modelsCache || []).find((x) => String(x.name).toLowerCase() === row.name.toLowerCase());
+      const div = document.createElement('div');
+      div.className = 'fb-row' + (row.enabled ? '' : ' off');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = row.enabled;
+      cb.disabled = !enabled;
+      cb.setAttribute('aria-label', `Use ${row.name} as a fallback`);
+      cb.onchange = () => { row.enabled = cb.checked; div.classList.toggle('off', !row.enabled); };
+      const name = document.createElement('span');
+      name.className = 'model-name';
+      name.textContent = row.name;
+      const meta = document.createElement('span');
+      meta.className = 'model-meta';
+      meta.textContent = m ? (window.PortalModels ? window.PortalModels.formatSize(m.size) : String(m.size)) : 'not installed';
+      const btns = document.createElement('div');
+      btns.className = 'model-btns';
+      const up = document.createElement('button');
+      up.className = 'btn small'; up.type = 'button'; up.textContent = '↑';
+      up.disabled = !enabled || i === 0;
+      up.setAttribute('aria-label', `Move ${row.name} earlier in the fallback chain`);
+      up.onclick = () => { const t = fallbackDraft[i - 1]; fallbackDraft[i - 1] = fallbackDraft[i]; fallbackDraft[i] = t; renderFallbackList(); };
+      const down = document.createElement('button');
+      down.className = 'btn small'; down.type = 'button'; down.textContent = '↓';
+      down.disabled = !enabled || i === fallbackDraft.length - 1;
+      down.setAttribute('aria-label', `Move ${row.name} later in the fallback chain`);
+      down.onclick = () => { const t = fallbackDraft[i + 1]; fallbackDraft[i + 1] = fallbackDraft[i]; fallbackDraft[i] = t; renderFallbackList(); };
+      btns.append(up, down);
+      div.append(cb, name, meta, btns);
+      list.append(div);
+    });
+  }
+
+  // Fields for saveSettings: the toggle plus the materialized chain.
+  // The primary (which the user may have changed in this same
+  // Settings session) is never a fallback for itself.
+  function fallbackSaveFields() {
+    const u = window.PortalFallback;
+    const primary = ($('#s-model').value || '').trim();
+    let list = u.materializeFallback(fallbackDraft, autoFallbackNames(primary));
+    if (Array.isArray(list)) list = list.filter((n) => n.toLowerCase() !== primary.toLowerCase());
+    return { fallbackEnabled: $('#s-fallback-enabled').checked, fallback: list };
   }
 
   async function useModel(name) {
@@ -1048,7 +1502,73 @@
     }
   }
 
+  /* ---------- custom slash commands (Settings) ---------- */
+
+  function snippetRow(snippet) {
+    const row = el('div', 'snippet-row');
+    const name = el('input', 'snippet-name');
+    name.type = 'text';
+    name.placeholder = 'name';
+    name.spellcheck = false;
+    name.autocomplete = 'off';
+    name.value = snippet ? snippet.name : '';
+    const prompt = el('input', 'snippet-prompt');
+    prompt.type = 'text';
+    prompt.placeholder = 'Prompt — use {diff} to attach the current diff';
+    prompt.spellcheck = false;
+    prompt.autocomplete = 'off';
+    prompt.value = snippet ? snippet.prompt : '';
+    const del = el('button', 'btn small');
+    del.type = 'button';
+    del.textContent = 'Delete';
+    del.onclick = () => row.remove();
+    row.append(name, prompt, del);
+    return row;
+  }
+  function renderSnippetRows(list) {
+    const box = $('#s-snippets-list');
+    box.innerHTML = '';
+    for (const s of list || []) box.append(snippetRow(s));
+    $('#s-snippets-status').textContent = '';
+  }
+  // Blank rows (both fields empty) are skipped, not errors — an
+  // untouched Add row must not block a save.
+  function readSnippetRows() {
+    const u = window.PortalSlashCmds;
+    const rows = [...document.querySelectorAll('#s-snippets-list .snippet-row')];
+    const snippets = [];
+    const names = new Set();
+    for (const row of rows) {
+      const name = row.querySelector('.snippet-name').value;
+      const prompt = row.querySelector('.snippet-prompt').value;
+      if (!String(name).trim() && !String(prompt).trim()) continue;
+      const v = u.validateSnippet(name, prompt, names);
+      if (!v.ok) return { ok: false, error: v.error };
+      names.add(v.snippet.name);
+      snippets.push(v.snippet);
+    }
+    return { ok: true, snippets };
+  }
+
   async function saveSettings() {
+    // Backstop for a host typed and saved without blurring the field
+    // (the change handler covers the usual path): refuse an invalid
+    // host, keep the modal open, and say so in the Models status line.
+    const u = window.PortalOllamaHost;
+    if (u) {
+      const v = u.normalizeHost($('#s-host').value);
+      if (!v.ok) {
+        $('#s-models-status').textContent = v.error;
+        return;
+      }
+    }
+    // Same pattern for snippets: an invalid row refuses the save and
+    // says so in the section status line, modal stays open.
+    const sn = readSnippetRows();
+    if (!sn.ok) {
+      $('#s-snippets-status').textContent = sn.error;
+      return;
+    }
     S.settings = await window.api.setSettings({
       model: $('#s-model').value,
       host: $('#s-host').value,
@@ -1062,16 +1582,23 @@
       chatFont: $('#s-chatfont').value,
       startDir: $('#s-dir').value,
       instructions: $('#s-instr').value,
+      snippets: sn.snippets,
       termFont: $('#s-termfont').value,
       shell: $('#s-shell').value,
       nanoComplete: $('#s-nano').checked,
       shellIntegration: $('#s-shellint').checked,
+      projectContext: $('#s-projctx').checked,
       autoOllama: $('#s-autoollama').value === 'yes',
+      // The fallback chain is only saved when the modal actually built
+      // it (Ollama was reachable and the helpers loaded); otherwise the
+      // stored chain is left untouched.
+      ...(fallbackDraft !== null && window.PortalFallback ? fallbackSaveFields() : {}),
     });
     applyTheme();
     window.TermUI.setNanoComplete(S.settings.nanoComplete);
     closeSettings();
-    pollStatus();
+    await pollStatus();
+    refreshModelList();
   }
 
   /* ---------- command palette (Ctrl+K) ---------- */
@@ -1086,9 +1613,12 @@
       { label: 'Toggle sidebar', run: () => $('#sidebar').classList.toggle('hidden') },
       { label: 'Open settings', keys: 'Ctrl+,', run: () => openSettings() },
       { label: 'Copy chat', run: async () => { if (S.cur) copyText(await window.api.chatMarkdown(S.cur.id)); } },
+      { label: 'Copy last code block', keys: 'Ctrl+Shift+C', keywords: 'code copy clipboard', run: () => copyLastCodeBlock() },
       { label: 'Export chat', run: () => { if (S.cur && S.cur.messages.length) window.api.exportChat(S.cur.id); } },
       { label: 'Ask AI about terminal selection', run: () => { window.TermUI.setView('split', { focus: false }); window.TermUI.askAi(); } },
       { label: 'Pull current agent model', run: () => { openSettings(); pullModel(); } },
+      { label: 'Draft changelog entry from diff', keywords: 'git changelog', run: async () => { if (!S.cur) return; if (isRunning()) { flashHint('Wait for the current turn to finish.'); return; } const text = await expandChangelogCommand(); if (text == null) return; sendMessage(text); } },
+      { label: 'Summarize a PR…', keywords: 'git pr pull request', run: () => { if (!S.cur) return; inputEl.value = '/pr '; inputEl.focus(); slashOnInput(); } },
       { label: 'Toggle auto-run', run: async () => { S.auto = await window.api.setAuto(!S.auto); renderAuto(); } },
       { label: 'Focus chat input', run: () => $('#input').focus() },
       { label: 'Focus search', run: () => { $('#sidebar').classList.remove('hidden'); $('#search').focus(); } },
@@ -1155,16 +1685,28 @@
   }
 
   async function pollStatus() {
-    S.status = await window.api.status();
+    const host = S.settings.host;
+    const st = await window.api.status();
+    // The host may have changed while this poll was in flight — the
+    // newer poll owns the dot, so a stale reply never paints the old
+    // host's models onto it.
+    if (S.settings.host !== host) return;
+    S.status = st;
+    // The configured model changed (Settings, palette, Use button):
+    // the "answered by a fallback" marker belongs to the old model.
+    if (S.settings.model !== S.lastModelSeen) { S.lastAnswerModel = null; S.lastModelSeen = S.settings.model; }
     const node = $('#status');
     node.classList.toggle('ok', S.status.ok);
     let text = 'Ollama offline';
     if (S.status.ok) {
       const has = S.status.models.some((m) => m === S.settings.model || m === S.settings.model + ':latest');
-      text = has ? S.settings.model : `${S.settings.model} not pulled`;
+      if (S.lastAnswerModel && S.lastAnswerModel !== S.settings.model) text = `${S.lastAnswerModel} (fallback)`;
+      else text = has ? S.settings.model : `${S.settings.model} not pulled`;
     }
     node.querySelector('span').textContent = text;
-    node.title = S.status.ok ? 'Connected to Ollama' : `Cannot reach ${S.settings.host}. Run "ollama serve".`;
+    node.title = window.PortalOllamaHost
+      ? window.PortalOllamaHost.statusTooltip(S.status.ok, S.settings.host)
+      : (S.status.ok ? 'Connected to Ollama' : `Cannot reach ${S.settings.host}. Run "ollama serve".`);
   }
 
   /* ---------- wiring ---------- */
@@ -1172,13 +1714,16 @@
   function bindUi() {
     $('#new-chat').onclick = () => startNewChat(false);
     document.querySelectorAll('.side-seg button').forEach((b) => { b.onclick = () => setSideMode(b.dataset.side); });
-    $('#files-refresh').onclick = () => refreshFileTree();
+    $('#files-refresh').onclick = () => { refreshFileTree(); refreshGitStatus(); };
     $('#toggle-side').onclick = () => $('#sidebar').classList.toggle('hidden');
     $('#open-settings').onclick = openSettings;
     $('#open-palette').onclick = () => openPalette();
     $('#s-cancel').onclick = closeSettings;
     $('#s-save').onclick = saveSettings;
     $('#s-models-refresh').onclick = refreshModels;
+    $('#s-fallback-enabled').onchange = () => renderFallbackList();
+    $('#s-snippets-add').onclick = () => $('#s-snippets-list').append(snippetRow(null));
+    $('#s-host').addEventListener('change', applyHostField);
     $('#s-models-pull').onclick = pullManagerModel;
     $('#s-model-pull').onclick = pullModel;
     $('#s-reset').onclick = async () => { $('#s-instr').value = await window.api.defaultInstructions(); };
@@ -1228,8 +1773,20 @@
     $('#export-chat').onclick = () => { if (S.cur && S.cur.messages.length) window.api.exportChat(S.cur.id); };
 
     sendBtn.onclick = sendMessage;
-    inputEl.addEventListener('input', autosize);
+    inputEl.addEventListener('input', () => { autosize(); slashOnInput(); });
     inputEl.addEventListener('keydown', (e) => {
+      if (slashIsOpen()) {
+        if (e.key === 'ArrowDown') { e.preventDefault(); if (SLASH.items.length) { SLASH.active = Math.min(SLASH.items.length - 1, SLASH.active + 1); slashRender(); } return; }
+        if (e.key === 'ArrowUp') { e.preventDefault(); if (SLASH.items.length) { SLASH.active = Math.max(0, SLASH.active - 1); slashRender(); } return; }
+        if (e.key === 'Escape') { e.preventDefault(); closeSlash(); return; }
+        if (e.key === 'Enter' || e.key === 'Tab') {
+          const item = SLASH.items[SLASH.active];
+          if (item) { e.preventDefault(); slashAccept(SLASH.active); return; }
+          closeSlash();
+          if (e.key === 'Tab') return; // no match: Tab moves focus as usual
+          // Enter with no match: fall through to send the literal text
+        }
+      }
       if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendMessage(); }
     });
 
@@ -1258,6 +1815,18 @@
       if (mod && e.key.toLowerCase() === 'n') { e.preventDefault(); startNewChat(false); }
       else if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); }
       else if (mod && e.key === ',') { e.preventDefault(); openSettings(); }
+      else if (mod && e.shiftKey && e.key.toLowerCase() === 'c') {
+        // Copy last code block: chat view only, never while typing in
+        // the composer or any other field, never with the palette or
+        // Settings open, never in terminal view (the chat is hidden
+        // there). The terminal is untouched: #termpanel targets return
+        // above, so its own Ctrl+Shift+C copy keeps working.
+        if (e.target.closest && e.target.closest('input, textarea, select, [contenteditable="true"]')) return;
+        if (paletteOpen() || !$('#modal').hidden) return;
+        if (document.body.dataset.view === 'term') return;
+        e.preventDefault();
+        copyLastCodeBlock();
+      }
       else if (e.key === 'Escape') {
         if (paletteOpen()) closePalette();
         else if (!$('#modal').hidden) closeSettings();
@@ -1275,12 +1844,30 @@
     bindUi();
     bindEvents();
     if (window.innerWidth <= 820) $('#sidebar').classList.add('hidden');
-    await startNewChat(true);
+    // Tab restore: reopen the last active chat and its terminal tabs
+    // when the saved session names a chat that still exists. Anything
+    // else (missing/corrupt session, deleted chat) falls through to
+    // the existing clean start — never a crash or a blank window.
+    let session = null;
+    try { session = window.api.getSession ? await window.api.getSession() : null; } catch { session = null; }
+    let restored = false;
+    if (session && session.chatId) {
+      try {
+        const r = await window.api.getChat(session.chatId);
+        if (r && r.chat) { await openChat(session.chatId); restored = true; }
+      } catch {}
+    }
+    if (!restored) await startNewChat(true);
     window.TermUI.init({
       fontSize: S.settings.termFont,
       fontFamily: monoStack(S.settings.termFontFamily),
       nanoComplete: S.settings.nanoComplete,
       getCwd: () => (S.cur && S.cur.cwd) || S.settings.startDir,
+      onSessionChange: () => saveSessionNow(),
+      // Restored inside init, before the saved view is applied, so no
+      // extra tab is auto-created by the view restore (see terminal.js).
+      initialTabs: restored ? session.tabs : null,
+      initialActiveTab: restored ? session.activeTab : 0,
       onAsk: (text) => {
         const block = '```\n' + text + '\n```\n';
         inputEl.value = (inputEl.value ? inputEl.value + '\n\n' : 'What happened here, and what should I do next?\n\n') + block;
@@ -1288,7 +1875,24 @@
         window.TermUI.setView('split', { focus: false });
         inputEl.focus();
       },
+      // A failed block's Explain button: one click sends the block's
+      // command, exit code, and output tail to the agent. Refused
+      // while a turn is running — sendMessage would otherwise STOP
+      // the running turn, which is never what a click means.
+      onExplain: (block) => {
+        if (!S.cur) return;
+        if (isRunning()) { flashHint('Wait for the current turn to finish.'); return; }
+        const u = window.PortalExplainer;
+        if (!u) return;
+        sendMessage(u.buildExplainMessage(block));
+        window.TermUI.setView('split', { focus: false });
+      },
     });
+    // A fresh start records the new chat now (a chat switch after
+    // this point saves through openChat / onSessionChange). In the
+    // restored path the session file already names the right chat,
+    // and the restore inside init saves the full tab list.
+    if (!restored) saveSessionNow();
     pollStatus();
     setInterval(pollStatus, 10000);
   }

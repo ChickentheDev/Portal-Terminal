@@ -3,9 +3,16 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const { createOsc133Parser } = require('./osc133.js');
 const ft = require('./filetools.js');
+const gs = require('./gitstatus.js');
+const oh = require('./ollamahost.js');
+const tr = require('./tabrestore.js');
+const sc = require('./slashcmds.js');
+const gh = require('./githelpers.js');
+const pc = require('./projcontext.js');
+const fb = require('./fallbackchain.js');
 
 // Linux (including SteamOS) often can't use Chromium's SUID sandbox for a
 // user-installed Electron. This app only loads its own local files.
@@ -72,11 +79,15 @@ const DEFAULT_SETTINGS = {
   chatFont: 15,
   startDir: os.homedir(),
   instructions: DEFAULT_INSTRUCTIONS,
+  snippets: [], // custom slash commands: [{ name, prompt }] — prompt may contain {diff}
   termFont: 13,
   shell: '',
   autoOllama: true,
   nanoComplete: true, // VS Code-style autocomplete inside nano
   shellIntegration: true, // OSC 133 markers: real exit codes + durations in command blocks
+  projectContext: true, // attach a small project snapshot to each agent turn
+  fallbackEnabled: true, // retry a failed turn with the next model in the chain
+  fallback: null, // ordered fallback model names; null = auto (other installed models, smallest first)
 };
 
 // Agent models: the terminal agent runs on one of these via Ollama.
@@ -200,7 +211,7 @@ const TOOLS = [
 ];
 
 let win = null;
-let chatsDir, settingsFile;
+let chatsDir, settingsFile, sessionFile;
 let settings = { ...DEFAULT_SETTINGS };
 let autoRun = false; // never persisted: every launch starts in "ask first" mode
 const live = new Map(); // chatId -> { abort, child, approval, exec, stopped }
@@ -218,18 +229,15 @@ const send = (channel, payload) => {
 
 /* ---------- storage ---------- */
 
-// "localhost:11434" (no scheme) makes every fetch throw "Failed to parse URL".
-// Accept it and assume http — the address field is free text.
-const normHost = (h) => {
-  const s = String(h || '').trim();
-  if (!s) return DEFAULT_SETTINGS.host;
-  return /^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? s : 'http://' + s;
-};
-
+// The Ollama address is normalized through ollamahost.js (one place):
+// a bare host gains http:// and :11434, an invalid saved value falls
+// back to the default on load and to the previous host on set.
 function loadSettings() {
   try {
     const s = { ...DEFAULT_SETTINGS, ...JSON.parse(fs.readFileSync(settingsFile, 'utf8')) };
-    s.host = normHost(s.host);
+    const hv = oh.normalizeHost(s.host);
+    s.host = hv.ok ? hv.host : DEFAULT_SETTINGS.host;
+    s.snippets = sc.sanitizeSnippets(s.snippets);
     return s;
   } catch {
     return { ...DEFAULT_SETTINGS };
@@ -254,13 +262,41 @@ function newChat() {
   writeChat(chat);
   return chat;
 }
-function purgeEmptyChats() {
+function purgeEmptyChats(keepId) {
   for (const f of fs.readdirSync(chatsDir)) {
     if (!f.endsWith('.json')) continue;
     try {
       const c = JSON.parse(fs.readFileSync(path.join(chatsDir, f), 'utf8'));
+      // Never purge the chat the session file names: startup must not
+      // delete the very chat it is about to restore.
+      if (keepId && c.id === keepId) continue;
       if (!c.messages || !c.messages.length) fs.unlinkSync(path.join(chatsDir, f));
     } catch {}
+  }
+}
+
+/* ---------- session (tab restore) ---------- */
+
+// The saved session (last active chat + its terminal tabs) lives in
+// userData/session.json, next to settings.json. A missing or corrupt
+// file is null, never a throw — the renderer starts clean instead.
+function loadSession() {
+  try {
+    return tr.parseSession(fs.readFileSync(sessionFile, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+function saveSession(state) {
+  const parsed = tr.parseSession(state);
+  if (!parsed) return false;
+  try {
+    const tmp = sessionFile + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(parsed));
+    fs.renameSync(tmp, sessionFile);
+    return true;
+  } catch {
+    return false;
   }
 }
 function listChats(q) {
@@ -318,8 +354,9 @@ function systemPrompt(chat) {
   return `${settings.instructions}\n\nOS: ${osName}.\nCurrent directory: ${chat.cwd}\nHome directory: ${os.homedir()}`;
 }
 
-function toApi(chat) {
-  const msgs = [{ role: 'system', content: systemPrompt(chat) }];
+function toApi(chat, snapshotText) {
+  const system = systemPrompt(chat) + (snapshotText ? `\n\nProject context:\n${snapshotText}` : '');
+  const msgs = [{ role: 'system', content: system }];
   for (const m of chat.messages) {
     if (m.role === 'user') msgs.push({ role: 'user', content: m.content });
     else if (m.role === 'assistant') {
@@ -336,14 +373,14 @@ function toApi(chat) {
   return msgs;
 }
 
-async function streamChat(chat, signal, out) {
+async function streamChat(chat, signal, out, snapshotText, model) {
   const res = await fetch(settings.host.replace(/\/$/, '') + '/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     signal,
     body: JSON.stringify({
-      model: settings.model,
-      messages: toApi(chat),
+      model: model || settings.model,
+      messages: toApi(chat, snapshotText),
       tools: TOOLS,
       stream: true,
       options: { num_ctx: Number(settings.ctx) || 8192 },
@@ -378,6 +415,85 @@ async function streamChat(chat, signal, out) {
     }
   }
   handle(buf);
+}
+
+/* ---------- model fallback chain ---------- */
+
+// List the models installed in Ollama (name, size, modified date).
+// Shared by the ollama:models IPC handler and the fallback chain,
+// so both see the same list.
+async function fetchInstalledModels() {
+  try {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 5000);
+    const res = await fetch(settings.host.replace(/\/$/, '') + '/api/tags', { signal: ctl.signal });
+    clearTimeout(t);
+    if (!res.ok) return { ok: false, error: `Ollama returned ${res.status}.` };
+    const j = await res.json();
+    return { ok: true, models: (j.models || []).map((m) => ({ name: m.name, size: m.size || 0, modified_at: m.modified_at || '' })) };
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    return { ok: false, error: /fetch failed|ECONNREFUSED|abort/i.test(msg) ? `Could not reach Ollama at ${settings.host}.` : msg };
+  }
+}
+
+// The fallback chain for this turn, computed lazily — only after the
+// primary model has already failed, so successful turns pay no extra
+// /api/tags call. Auto mode lists installed models; an explicit list
+// is checked against what is installed. If /api/tags itself fails,
+// an explicit list is tried blind (a missing name just 404s and the
+// chain moves on); auto mode has nothing to try.
+async function getFallbackChain() {
+  if (settings.fallbackEnabled === false) return { chain: [], skipped: [] };
+  const explicit = Array.isArray(settings.fallback) ? settings.fallback : null;
+  const r = await fetchInstalledModels();
+  if (!r.ok) {
+    if (!explicit) return { chain: [], skipped: [] };
+    const names = fb.sanitizeFallbackList(explicit) || [];
+    return {
+      chain: names.filter((n) => n.toLowerCase() !== String(settings.model).trim().toLowerCase()).slice(0, fb.MAX_CHAIN),
+      skipped: [],
+    };
+  }
+  return fb.buildChain({ primary: settings.model, installed: r.models, explicit, enabled: true });
+}
+
+// Try the configured model, then each model in the fallback chain,
+// for one step of a turn. Returns { partial, model } for the model
+// that answered. A fresh partial is built per attempt, so a failed
+// mid-stream fragment never lands in the assistant message; the
+// in-progress partial is also mirrored on `holder`, so a user stop
+// mid-stream still keeps the text streamed so far (as before).
+// The retry re-runs streamChat with the same chat.messages history,
+// so it continues from the last assistant step: if a tool already
+// ran, its result is in the history and the fallback model does not
+// re-run it; if the primary failed before any tool call, the
+// fallback starts the turn fresh.
+async function streamChatWithFallback(chat, st, snapshotText, holder) {
+  let chainInfo = null;
+  const tried = [];
+  let model = settings.model;
+  for (;;) {
+    const partial = { role: 'assistant', content: '', thinking: '', tool_calls: [] };
+    holder.partial = partial;
+    try {
+      await streamChat(chat, st.abort.signal, partial, snapshotText, model);
+      return { partial, model };
+    } catch (e) {
+      if (st.stopped) throw e;
+      tried.push(model);
+      if (!fb.isModelError(e)) {
+        throw new Error(fb.formatTriedError(String(e && e.message ? e.message : e), tried));
+      }
+      if (!chainInfo) chainInfo = await getFallbackChain();
+      const next = chainInfo.chain[tried.length - 1];
+      if (!next) {
+        throw new Error(fb.formatTriedError(String(e && e.message ? e.message : e), tried));
+      }
+      send('fallback', { chatId: chat.id, from: model, to: next, reason: fb.shortReason(e), skipped: chainInfo.skipped });
+      model = next;
+    }
+  }
 }
 
 /* ---------- commands ---------- */
@@ -631,16 +747,33 @@ async function runTurn(chatId, text) {
     send('message', { chatId, message: m });
   };
   let partial = null;
+  const holder = { partial: null }; // in-progress partial, for the stop path
+  let answeredModel = null; // model that answered the last successful step
   try {
     if (!chat.messages.length) chat.title = text.replace(/\s+/g, ' ').trim().slice(0, 48) || 'New chat';
     add({ role: 'user', content: text });
     send('chat-updated', { chatId });
 
+    // Project-aware context: one snapshot per turn, computed once here
+    // and reused for every step. Never persisted in chat.messages — it
+    // rides only in the system message the model sees, and the renderer
+    // shows it as a collapsible line from the 'context' event.
+    let snapshotText = null;
+    if (settings.projectContext !== false) {
+      const snap = pc.buildSnapshot(chat.cwd);
+      if (snap.ok) {
+        snapshotText = snap.text;
+        send('context', { chatId, summary: snap.summary, text: snap.text });
+      }
+    }
+
     for (let step = 0; step < (Number(settings.maxSteps) || 15); step++) {
-      partial = { role: 'assistant', content: '', thinking: '', tool_calls: [] };
-      await streamChat(chat, st.abort.signal, partial);
+      const attempt = await streamChatWithFallback(chat, st, snapshotText, holder);
+      partial = attempt.partial;
+      answeredModel = attempt.model;
       const msg = partial;
       partial = null;
+      holder.partial = null;
       if (!msg.thinking) delete msg.thinking;
       if (!msg.tool_calls.length) delete msg.tool_calls;
       add(msg);
@@ -653,7 +786,7 @@ async function runTurn(chatId, text) {
     }
   } catch (e) {
     if (st.stopped) {
-      if (partial && partial.content.trim()) add({ role: 'assistant', content: partial.content });
+      if (holder.partial && holder.partial.content.trim()) add({ role: 'assistant', content: holder.partial.content });
     } else {
       const msg = String(e && e.message ? e.message : e);
       send('error', {
@@ -666,7 +799,7 @@ async function runTurn(chatId, text) {
   } finally {
     live.delete(chatId);
     deletedChats.delete(chatId);
-    send('done', { chatId });
+    send('done', { chatId, model: answeredModel });
   }
 }
 
@@ -708,8 +841,8 @@ function killTerm(id) {
 async function ensureOllama() {
   if (!settings.autoOllama) return;
   try {
-    const u = new URL(settings.host);
-    if (!['127.0.0.1', 'localhost', '::1', '[::1]'].includes(u.hostname)) return;
+    // A remote host is never auto-started — only a local Ollama is.
+    if (!oh.isLocalHost(settings.host)) return;
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), 1500);
     try {
@@ -734,7 +867,10 @@ function registerIpc() {
     next.ctx = Math.max(1024, Number(next.ctx) || 8192);
     next.maxSteps = Math.max(1, Number(next.maxSteps) || 15);
     next.timeout = Math.max(5, Number(next.timeout) || 120);
-    next.host = normHost(next.host);
+    next.host = (() => {
+      const hv = oh.normalizeHost(next.host);
+      return hv.ok ? hv.host : settings.host; // invalid host: keep the previous one
+    })();
     next.model = String(next.model || DEFAULT_SETTINGS.model).trim();
     if (!next.instructions || !String(next.instructions).trim()) next.instructions = DEFAULT_INSTRUCTIONS;
     if (!next.startDir || !fs.existsSync(next.startDir)) next.startDir = os.homedir();
@@ -748,9 +884,13 @@ function registerIpc() {
     if (!FONT_FAMS.includes(next.chatFontFamily)) next.chatFontFamily = 'system';
     next.chatFont = Math.min(20, Math.max(12, Number(next.chatFont) || 15));
     next.shell = String(next.shell || '').trim();
+    next.snippets = sc.sanitizeSnippets(next.snippets);
     next.autoOllama = next.autoOllama !== false && next.autoOllama !== 'false';
     next.nanoComplete = next.nanoComplete !== false && next.nanoComplete !== 'false';
     next.shellIntegration = next.shellIntegration !== false && next.shellIntegration !== 'false';
+    next.projectContext = next.projectContext !== false && next.projectContext !== 'false';
+    next.fallbackEnabled = next.fallbackEnabled !== false && next.fallbackEnabled !== 'false';
+    next.fallback = fb.sanitizeFallbackList(next.fallback);
     settings = next;
     saveSettings();
     return settings;
@@ -891,20 +1031,7 @@ function registerIpc() {
 
   // List the models actually installed in Ollama (name, size, modified
   // date) for the Settings model manager. Leaves ollama:status alone.
-  ipcMain.handle('ollama:models', async () => {
-    try {
-      const ctl = new AbortController();
-      const t = setTimeout(() => ctl.abort(), 5000);
-      const res = await fetch(settings.host.replace(/\/$/, '') + '/api/tags', { signal: ctl.signal });
-      clearTimeout(t);
-      if (!res.ok) return { ok: false, error: `Ollama returned ${res.status}.` };
-      const j = await res.json();
-      return { ok: true, models: (j.models || []).map((m) => ({ name: m.name, size: m.size || 0, modified_at: m.modified_at || '' })) };
-    } catch (e) {
-      const msg = String((e && e.message) || e);
-      return { ok: false, error: /fetch failed|ECONNREFUSED|abort/i.test(msg) ? `Could not reach Ollama at ${settings.host}.` : msg };
-    }
-  });
+  ipcMain.handle('ollama:models', async () => fetchInstalledModels());
 
   // Delete an installed model. Ollama unloads an idle loaded model
   // first; a model actively serving a request is refused and the
@@ -940,7 +1067,9 @@ function registerIpc() {
     const py = findPython();
     if (!py) return { error: 'The built-in terminal needs Python 3 (python3) installed.' };
     const o = opts || {};
-    const shell = settings.shell || process.env.SHELL || '/bin/bash';
+    // A restore may name the shell the tab had; it is used only when
+    // the file still exists, else the configured/default shell applies.
+    const shell = (o.shell && fs.existsSync(o.shell)) ? o.shell : (settings.shell || process.env.SHELL || '/bin/bash');
     const dir = o.cwd && fs.existsSync(o.cwd) ? o.cwd : os.homedir();
     const env = {};
     for (const [k, v] of Object.entries(process.env)) {
@@ -986,7 +1115,7 @@ function registerIpc() {
       terms.delete(id);
       send('term-exit', { id, code });
     });
-    return { id };
+    return { id, shell };
   });
   ipcMain.on('term:write', (_e, id, data) => {
     const c = terms.get(String(id));
@@ -1011,6 +1140,168 @@ function registerIpc() {
       return { ok: true, text: fs.readFileSync(p, 'utf8') };
     } catch { return { ok: false }; }
   });
+
+  // Git status for the cwd chip. Read-only: rev-parse for the branch,
+  // status --porcelain for the changed-file count. execFile, no shell —
+  // the cwd is an argv element, never interpolated. Every git failure
+  // (not a repo, git missing, timeout) degrades to "not a repo": the
+  // chip shows no indicator, never an error.
+  function runGit(args, cwd) {
+    return new Promise((resolve) => {
+      execFile('git', args, { cwd, timeout: 5000, maxBuffer: 1024 * 1024, windowsHide: true }, (err, stdout) => {
+        if (err) return resolve({ ok: false, error: String((err && err.message) || err) });
+        resolve({ ok: true, out: String(stdout || '') });
+      });
+    });
+  }
+  async function gitStatusFor(cwd) {
+    if (!cwd || !fs.existsSync(cwd)) return { ok: true, isRepo: false };
+    // symbolic-ref reports the branch HEAD points at — including an
+    // unborn branch (no commits yet). rev-parse --abbrev-ref HEAD
+    // cannot tell an unborn branch from a detached HEAD: both print
+    // 'HEAD'. symbolic-ref fails exactly when HEAD is detached, so a
+    // failure here means detached, and the short hash stands in.
+    const sym = await runGit(['-C', cwd, 'symbolic-ref', '-q', '--short', 'HEAD'], cwd);
+    let branch, detached;
+    if (sym.ok && sym.out.trim()) {
+      branch = sym.out.trim();
+      detached = false;
+    } else {
+      // symbolic-ref also fails outside a repo — tell that apart from
+      // a detached HEAD before falling back to the short hash.
+      const dir = await runGit(['-C', cwd, 'rev-parse', '--git-dir'], cwd);
+      if (!dir.ok) return { ok: true, isRepo: false };
+      const sha = await runGit(['-C', cwd, 'rev-parse', '--short', 'HEAD'], cwd);
+      branch = sha.ok && sha.out.trim() ? sha.out.trim() : 'HEAD';
+      detached = true;
+    }
+    // --untracked-files=normal reports an untracked directory as one
+    // entry, so an untracked node_modules never enumerates thousands
+    // of files. A changed submodule is one porcelain line; git does
+    // not recurse into it.
+    const st = await runGit(['-C', cwd, 'status', '--porcelain=v1', '--untracked-files=normal'], cwd);
+    if (!st.ok) return { ok: true, isRepo: true, branch, detached, dirty: null, capped: false };
+    const counted = gs.countPorcelain(st.out);
+    return { ok: true, isRepo: true, branch, detached, dirty: counted.count, capped: counted.capped };
+  }
+
+  // Uncommitted diff for slash commands (/review, /commit-msg, and
+  // snippets with a {diff} placeholder). Same runGit as git:status:
+  // execFile, no shell, 5 s timeout, 1 MB output cap. Scoped to the
+  // chat's cwd (the repo root may be above it): `git diff HEAD -- .`
+  // covers staged + unstaged vs HEAD; with no commits yet (unborn
+  // HEAD) diff HEAD fails, so fall back to plain `git diff`.
+  // Untracked files are never in a diff — their names (never contents)
+  // ride along so the review can say new files exist. The raw diff is
+  // capped in the renderer module (30 KB); main returns the full text
+  // up to the 1 MB exec cap and flags nothing itself.
+  async function gitDiffFor(cwd) {
+    if (!cwd) return { ok: false, error: 'No working directory for this chat.' };
+    if (!fs.existsSync(cwd)) return { ok: false, error: 'The chat\u2019s working directory no longer exists.' };
+    const dir = await runGit(['-C', cwd, 'rev-parse', '--git-dir'], cwd);
+    if (!dir.ok) return { ok: true, isRepo: false };
+    const bare = await runGit(['-C', cwd, 'rev-parse', '--is-bare-repository'], cwd);
+    if (bare.ok && String(bare.out || '').trim() === 'true') return { ok: false, error: 'This is a bare repository (no working tree).' };
+    let d = await runGit(['-C', cwd, 'diff', 'HEAD', '--', '.'], cwd);
+    if (!d.ok) {
+      // Unborn HEAD (no commits yet): `git diff HEAD` has nothing to
+      // diff against. The uncommitted work is the staged part plus the
+      // unstaged part — neither alone is the whole diff.
+      const unstaged = await runGit(['-C', cwd, 'diff', '--', '.'], cwd);
+      const staged = await runGit(['-C', cwd, 'diff', '--cached', '--', '.'], cwd);
+      const parts = [unstaged.ok ? unstaged.out : '', staged.ok ? staged.out : ''].filter(Boolean);
+      if (!parts.length) return { ok: false, error: 'Could not read the diff.' };
+      d = { ok: true, out: parts.join('\n') };
+    }
+    // The pathspec scopes the untracked list to the chat's cwd, the same
+    // scope as the diff — without it `git status` reports the whole repo
+    // and a subdir chat would name files outside its directory.
+    const st = await runGit(['-C', cwd, 'status', '--porcelain=v1', '--untracked-files=normal', '--', '.'], cwd);
+    const untracked = [];
+    let untrackedTruncated = false;
+    if (st.ok) {
+      for (const line of String(st.out).split('\n')) {
+        if (!line.startsWith('?? ')) continue;
+        if (untracked.length >= 20) { untrackedTruncated = true; break; }
+        untracked.push(line.slice(3).trim());
+      }
+    }
+    return { ok: true, isRepo: true, diff: String(d.out || ''), untracked, untrackedTruncated };
+  }
+
+  // One pull request for /pr <number>: title, description, and diff,
+  // fetched with the `gh` CLI when it is installed, else the public
+  // GitHub API. No token is sent anywhere — the app holds no GitHub
+  // token and none is invented, so the API path only works for public
+  // repos. execFile/fetch, no shell; every call scoped to the chat's
+  // cwd. A `gh` that exists but fails reports its own error (usually
+  // "not logged in" — the fix is `gh auth login`); the API is not
+  // silently tried behind it.
+  function runCmd(cmd, args, cwd, timeoutMs) {
+    return new Promise((resolve) => {
+      execFile(cmd, args, { cwd, timeout: timeoutMs, maxBuffer: 2 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+        if (err) return resolve({ ok: false, error: String((err && err.message) || err), stderr: String(stderr || '') });
+        resolve({ ok: true, out: String(stdout || '') });
+      });
+    });
+  }
+  function ghAvailable() {
+    // `gh --version` is the presence probe: it exits 0 with the
+    // binary there and ENOENT without it. A gh that exists but is
+    // not logged in still reports its version fine.
+    return runCmd('gh', ['--version'], process.cwd(), 5000).then((r) => r.ok);
+  }
+  async function gitPrViaGh(cwd, n) {
+    const view = await runCmd('gh', ['pr', 'view', String(n), '--json', 'title,body,state,author,baseRefName,headRefName,additions,deletions'], cwd, 15000);
+    if (!view.ok) {
+      const first = String(view.stderr || view.error || '').split('\n').filter(Boolean)[0] || 'gh pr view failed.';
+      return { ok: false, error: first.slice(0, 200) };
+    }
+    let meta;
+    try { meta = gh.parseGhPrJson(JSON.parse(view.out)); } catch { return { ok: false, error: 'Could not read the gh output for PR #' + n + '.' }; }
+    if (!meta) return { ok: false, error: 'Could not read the gh output for PR #' + n + '.' };
+    const diff = await runCmd('gh', ['pr', 'diff', String(n)], cwd, 15000);
+    if (!diff.ok) return { ok: false, error: 'Could not read the diff for PR #' + n + '.' };
+    return { ok: true, pr: { ...meta, number: n, diff: diff.out } };
+  }
+  async function fetchGhApi(url, accept) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 15000);
+    try {
+      const res = await fetch(url, { headers: { Accept: accept, 'User-Agent': 'Portal-Terminal' }, signal: ctrl.signal });
+      const text = await res.text();
+      return { status: res.status, text };
+    } catch (e) {
+      return { status: 0, text: '', error: String((e && e.message) || e) };
+    } finally { clearTimeout(t); }
+  }
+  async function gitPrViaApi(cwd, n) {
+    const remote = await runGit(['-C', cwd, 'remote', 'get-url', 'origin'], cwd);
+    const repo = remote.ok ? gh.parseGitHubRemote(remote.out) : null;
+    if (!repo) return { ok: false, error: 'No GitHub remote found for this repo — install the gh CLI (gh auth login) to summarize PRs.' };
+    const base = 'https://api.github.com/repos/' + repo.owner + '/' + repo.repo + '/pulls/' + n;
+    const meta = await fetchGhApi(base, 'application/vnd.github+json');
+    if (meta.status === 404) return { ok: false, error: 'PR #' + n + ' was not found, or it is private — install the gh CLI (gh auth login) for private repos.' };
+    if (meta.status === 403) return { ok: false, error: 'GitHub rate-limited the request — try again later, or install the gh CLI (gh auth login).' };
+    if (meta.status !== 200) return { ok: false, error: 'GitHub returned HTTP ' + (meta.status || 'no response') + ' for PR #' + n + '.' };
+    let j;
+    try { j = JSON.parse(meta.text); } catch { return { ok: false, error: 'Could not read the GitHub reply for PR #' + n + '.' }; }
+    const parsed = gh.parseGhPrJson(j);
+    if (!parsed) return { ok: false, error: 'Could not read the GitHub reply for PR #' + n + '.' };
+    const d = await fetchGhApi(base, 'application/vnd.github.diff');
+    if (d.status !== 200) return { ok: false, error: 'Could not read the diff for PR #' + n + '.' };
+    return { ok: true, pr: { ...parsed, number: n, diff: d.text } };
+  }
+  async function gitPrFor(cwd, number) {
+    const n = Number(number);
+    if (!Number.isInteger(n) || n < 1 || n > gh.PR_NUMBER_MAX) return { ok: false, error: 'Not a valid PR number.' };
+    if (!cwd) return { ok: false, error: 'No working directory for this chat.' };
+    if (!fs.existsSync(cwd)) return { ok: false, error: 'The chat\u2019s working directory no longer exists.' };
+    const dir = await runGit(['-C', cwd, 'rev-parse', '--git-dir'], cwd);
+    if (!dir.ok) return { ok: false, error: 'This chat\u2019s directory is not a git repo.' };
+    if (await ghAvailable()) return gitPrViaGh(cwd, n);
+    return gitPrViaApi(cwd, n);
+  }
 
   // Sidebar file tree: list one directory of the chat's cwd, and read
   // one file as a chat card. Both go through the filetools scope
@@ -1053,6 +1344,38 @@ function registerIpc() {
     return { ok: true, message: msg };
   });
 
+  ipcMain.handle('git:status', (_e, chatId) => {
+    const chat = getChatOrNull(chatId);
+    if (!chat) return { ok: false, error: 'Chat not found.' };
+    return gitStatusFor(chat.cwd);
+  });
+
+  ipcMain.handle('git:diff', async (_e, chatId) => {
+    const chat = getChatOrNull(chatId);
+    if (!chat) return { ok: false, error: 'Chat not found.' };
+    return gitDiffFor(chat.cwd);
+  });
+
+  ipcMain.handle('git:pr', async (_e, chatId, number) => {
+    const chat = getChatOrNull(chatId);
+    if (!chat) return { ok: false, error: 'Chat not found.' };
+    return gitPrFor(chat.cwd, number);
+  });
+
+  // Tab restore: the saved session (last active chat + its terminal
+  // tabs). get sanitizes missing cwds to the start directory; set
+  // validates and writes atomically. Either returns null/false on
+  // bad data — the renderer starts clean instead of crashing.
+  ipcMain.handle('session:get', () => {
+    const s = loadSession();
+    if (!s) return null;
+    return tr.sanitizeSession(s, {
+      exists: (d) => { try { return fs.existsSync(d); } catch { return false; } },
+      defaultDir: settings.startDir,
+    });
+  });
+  ipcMain.handle('session:set', (_e, state) => saveSession(state));
+
   ipcMain.handle('clipboard:read', () => clipboard.readText());
   ipcMain.handle('clipboard:write', (_e, text) => { clipboard.writeText(String(text)); return true; });
   ipcMain.handle('open:external', (_e, url) => {
@@ -1092,9 +1415,11 @@ function createWindow() {
 app.whenReady().then(() => {
   chatsDir = path.join(app.getPath('userData'), 'chats');
   settingsFile = path.join(app.getPath('userData'), 'settings.json');
+  sessionFile = path.join(app.getPath('userData'), 'session.json');
   fs.mkdirSync(chatsDir, { recursive: true });
   settings = loadSettings();
-  purgeEmptyChats();
+  const savedSession = loadSession();
+  purgeEmptyChats(savedSession ? savedSession.chatId : null);
   registerIpc();
   ensureOllama();
   Menu.setApplicationMenu(

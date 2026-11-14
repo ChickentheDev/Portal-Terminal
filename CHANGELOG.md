@@ -1,5 +1,118 @@
 # Changelog
 
+## [0.3.9] - 2026-11-13
+
+### Copy last code block
+Ctrl+Shift+C (Cmd+Shift+C on Mac) now copies the last fenced code block the agent produced in the current chat — raw contents, no fences — so you can paste it into the terminal without selecting it by hand. The composer hint confirms what was copied ("Copied python code block: print("hello")"), and with no block yet it flashes "No code block to copy." instead of copying nothing. The same action is in the Commands palette (Ctrl+K) as "Copy last code block". The shortcut fires in the chat and split views only, never while you are typing in the composer, the search box, the palette, or a Settings field, and never in terminal view or with the terminal focused — the terminal's own Ctrl+Shift+C is untouched. Only agent messages count: a fenced block you pasted into the composer can never be copied by mistake.
+Limits, stated plainly: it copies the last block in the current chat only, so switching chats switches the pool; a block still streaming in is copied as it stands at that moment, so the tail may be incomplete if the reply is still generating; the hint shows the first 40 characters, truncated in the confirmation but not in the clipboard; there is no per-block choice — if the block you want is not the last one, use that block's own Copy button.
+
+### Model fallback chain
+When the agent's model fails a turn, the app now retries with the next model in a fallback chain instead of dying on the error. The chain lives in Settings → Models ("Fall back to another model if the agent model fails", on by default): by default it is every other installed model, smallest first — when a big model fails it is usually out of memory, so a smaller model is the most likely to load — and you can check, uncheck, and reorder the list there. A failure that is worth retrying is a model error: the model crashing mid-generation (Ollama 500, like the "unexpected EOF" that killed hermes3:8b in the sandbox), a 404 for a missing model, or a 502/503. Ollama being unreachable, a user stop, or a denied tool call never trigger a fallback. When it happens you see a line in the chat — "hermes3:8b failed (Ollama returned 500) — retrying with hermes3:3b" — and the sidebar shows which model actually answered ("hermes3:3b (fallback)") until the configured model answers a turn again or you change it. The retry continues the turn from the last step, never from scratch: if a tool already ran, its result is in the history and the fallback model does not re-run it. If every model in the chain fails, the error names every model that was tried. The configured agent model never changes.
+Limits, stated plainly: with one model installed, or the toggle off, a failure behaves exactly as before; the chain is tried in order with no timing budget, so a slow model that eventually fails costs its full generation time before the next model is tried; a turn that died mid-sentence restarts that step's wording from scratch on the fallback model; the sidebar chip shows the model that answered the most recent turn and does not reset until the next turn completes; a model pulled while Settings is open does not appear in the fallback list until the modal is reopened.
+
+### Project-aware context
+At the start of every agent turn, the app now tells the model about the project it is working in: the project name (from `package.json`, else the folder name), stack hints (Node, Rust, Go, Python, … from marker files or file extensions), a top-level file list (folders first, max 30 entries), and the first 40 lines of the README when there is one. The snapshot rides in the turn's system message — never persisted to the chat file — and the user sees exactly what was attached as a collapsible "Project context" line under their message. A Settings checkbox ("Project context", on by default) turns it off entirely; off means no snapshot and no line. The snapshot is read-only and cwd-scoped: symlinked entries that escape the working directory are skipped, dotfiles and build directories are never listed, and only `package.json` (the name field) and the README are ever read — secrets are never included.
+Limits, stated plainly: the tree is top level only, so a `src/`-heavy layout reads as one line (the agent still has `file_list` for depth); the snapshot is a point-in-time listing taken when the turn starts, so a file created mid-turn is not in it; a README longer than 40 lines is summarized from its head only; the context line is ephemeral and is not shown again when an old chat is reopened; typically 200–600 tokens per turn, worst case ~1.5k with a dense README.
+
+### Git helpers
+Two new deliberate helpers that turn the agent's git knowledge into one-click actions, both firing a normal agent turn with context attached — nothing runs or writes without the user asking. `/changelog` drafts a Keep-a-Changelog-style entry (Added / Changed / Fixed, one line per change, no version header or date) from the current uncommitted diff, as text to copy — it never writes CHANGELOG.md. `/pr 12` fetches a pull request (title, description, diff) and asks the agent to summarize what it changes and what to watch for in review; the number is typed inline, and the popup stays open while digits follow. The PR fetch uses the `gh` CLI when it is installed (its own auth), else the public GitHub API with no token — so the API path only works for public repos, and private PRs say so and point at `gh auth login`. Both also live in the Commands palette (Ctrl+K, type `git`): "Draft changelog entry from diff" and "Summarize a PR…" (which prefills `/pr ` in the composer). `/commit-msg` is unchanged.
+Limits, stated plainly: `/changelog` drafts text to copy and still needs a human eye before pasting; `/pr` needs a number — bare `/pr` does nothing but flash the hint; the popup's space-closes rule still applies to every other command — `/pr` is the only one that keeps the popup open past a space, and only while digits follow; the API fallback is unauthenticated (public repos only, 60 requests/hour); a PR fetch can take up to ~15 s on a slow network and the turn waits for it; the PR body is head-truncated at 4 KB.
+
+### Command explainer/fixer
+A failed command block in the blocks rail now has an Explain button next to Copy and Rerun. One click sends that block's command, its exit code, and the last ~4 KB of its terminal output to the agent, asking it to diagnose the error first and then propose a corrected command by calling `run_command` — so the fix lands in the existing approval card (Run / Deny / Always run) and never runs on its own. The message starts with `/explain`, the same first line the `/explain` slash command sends, and it says so when the output was cut. Clicking Explain while a turn is running is refused with the composer hint instead of interrupting the turn, and after sending the app switches to split view so the diagnosis streams visibly next to the terminal.
+Limits, stated plainly: the button appears only on blocks with a non-zero exit code — tracker-fallback blocks (no exit code) and cancelled blocks get none; the output tail is the last 30 lines of the focused pane's buffer, capped at 4 KB; if the agent replies with a diagnosis and no `run_command` call, no approval card appears and nothing is offered to run; the recorded command for a compound command typed slowly is the first simple command (the 0.3.0 anchor that refines it to the full line lives only 200 ms after the prompt), but it is never a truncated fragment.
+
+### Slash commands and snippets
+Type `/` in the chat box and a small popup lists the commands you can fire: `/review` asks the agent to review the current uncommitted diff, `/commit-msg` asks it to write a commit message from the diff (the message comes back as text — nothing is committed for you), and `/explain` asks it to explain the last terminal command and its output. You can also add your own commands in Settings — a name plus a prompt template, stored in settings.json — and they show up in the same popup; a template can include `{diff}` to attach the current diff. A command expands into a normal turn with its context attached; nothing runs or changes without the agent's usual approval. The diff is gathered in the main process, scoped to the chat's working directory, capped at 30 KB (the message says so when it is cut), and untracked files are named, never shown. When there is nothing to attach — a clean repo, a directory that is not a repo, no terminal command yet — the command does not fire and the reason flashes under the input instead.
+Limits, stated plainly: expansion happens only through the popup accept — typing the full command and pressing Enter with the popup dismissed sends it literally; v1 commands take no arguments, so a space after the name closes the popup; `/explain` uses the focused pane's last block plus the last 30 lines of that pane's terminal buffer; snippets support `{diff}` only in v1; a bare repository or a deleted working directory is refused with a reason instead of sending an empty review.
+
+### Tab restore
+Restarting Portal now puts you back where you were: the last active
+chat reopens, and its terminal tabs come back, each with the same
+working directory and shell it had (fresh shells, not resurrected
+processes). The state is written on every change that matters — tab
+open/close, tab switch, chat switch — not only on quit, so the app
+survives a crash and still restores. A missing or corrupt session
+file starts clean with a new chat, never a crash or a blank window;
+a tab whose directory was deleted opens in the start directory
+instead, and a tab whose shell is gone starts with the default
+shell. Split panes are deliberately not restored, and neither are
+scrollback, command blocks, or an in-flight agent turn — tabs start
+fresh.
+Limits, stated plainly: a tab restores to the directory its shell
+started in, not to a directory reached by `cd` inside the tab; the
+saved shell is restored only if it still exists on disk; if the
+saved chat was deleted, the app starts clean and the tabs are not
+restored without their chat.
+
+### Remote Ollama host
+The Ollama address field in Settings now really works for a server
+on another machine: enter a bare host or IP (`192.168.1.10`), a
+hostname, or a full URL, and status, the model list, pulls, deletes,
+and the agent's chat requests all go to that host. A bare address
+gains `http://` and the default port 11434, so `192.168.1.10` means
+`http://192.168.1.10:11434`; an explicit port is always kept, and a
+path on the address is dropped. The field applies live when you
+leave it — the model list below refreshes to the new host's models
+in place — and an invalid address is refused with an inline error
+instead of being saved. A host that doesn't answer says so by name
+("Can't reach Ollama at http://192.168.1.10:11434 — check the
+address and that Ollama is running there") instead of telling you
+to run `ollama serve`, which is the wrong advice for another
+machine; the sidebar status tooltip is host-aware the same way.
+"Start Ollama automatically" is disabled while the address is
+remote (it only ever worked locally) and re-enables for a local
+host. The default stays `http://127.0.0.1:11434`, and an existing
+local setup behaves exactly as before.
+Limits, stated plainly: no auth or token support — the remote
+Ollama must allow unauthenticated requests; a pull already in
+flight keeps streaming from the host it started against if you
+change hosts mid-pull; the model list shows the host at refresh
+time; HTTPS to a host with a self-signed certificate fails and
+reads as offline; a LAN IP that happens to be this machine still
+counts as remote.
+
+### Git status in the cwd chip
+When the current chat's working directory is inside a git repo, the
+cwd chip in the top bar shows the branch name after the path, plus a
+filled dot with the count of changed files when dirty (`…/my-app ·
+main ●3`). A clean repo shows the branch alone, and a directory that
+isn't a repo shows no indicator at all — the chip stays exactly as it
+was. Detached HEAD shows the short commit hash instead of a branch
+name, and the tooltip always carries the full sentence ("On branch
+main — 3 changed files", "Detached HEAD at …", "… — clean"). Status
+refreshes when the working directory changes, when you switch chats,
+when an agent file write or edit applies, and from the Files Refresh
+button. The chip is inline-flex with the path truncating first, so at
+narrower widths the git label stays visible while the path gives way.
+Limits, stated plainly: the chip shows the status at refresh time —
+an external change (a terminal `git commit`, a `git pull`) only
+appears after a refresh trigger, there is no watcher or polling; the
+dirty count is a file count, not a line count, and caps at `99+`; a
+repo with no commits yet shows its unborn branch name with untracked
+files as dirty; `git` must be installed, without it the chip
+silently shows no git label; a `git status` taking longer than 5 s
+shows no indicator until the next refresh.
+
+### Split panes
+The terminal tab bar has a Split button that splits the current tab
+into two panes side by side. Each pane is an independent terminal
+with its own shell — run a server in one while curling it in the
+other, or watch logs beside a shell. Focus follows the clicked pane
+(the focused pane gets a frame), and the blocks rail, terminal
+search, nano autocomplete, and Ask AI all follow the focused pane.
+Each pane has a × button to close it; Unsplit always removes the
+second pane and keeps the primary tab, whichever side is focused.
+A pane whose shell exits cleanly auto-unsplits; a pane whose shell
+exits with an error stays put with the exit message until you close
+it, and a dead tab refuses to split. New tabs start unsplit.
+Limits, stated plainly: max 2 panes, vertical split only — no
+horizontal split, no drag resizing between panes, no moving a pane
+to its own tab; split state does not persist across restarts;
+the blocks rail shows the focused pane's blocks only; switching
+focus between panes closes the search bar (same as switching tabs)
+and the query is not kept.
+
 ## 0.3.2
 
 ### File tree sidebar
